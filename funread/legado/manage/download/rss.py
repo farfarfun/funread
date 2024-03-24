@@ -21,11 +21,12 @@ class RSSSourceFormat:
     def run(self):
         keys = [key for key in self.source.keys() if not self.source[key]]
         for key in keys:
-            if key in self.source.keys():
-                self.source.pop(key)
+            
+            self.source.pop(key)
 
         for key in ['customOrder', 'respondTime', 'lastUpdateTime']:
-            self.source.pop(key)
+            if key in self.source.keys():
+                self.source.pop(key)
 
         for key in ['searchUrl', 'exploreUrl']:
             if key in self.source.keys():
