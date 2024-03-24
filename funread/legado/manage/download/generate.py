@@ -3,7 +3,7 @@ from datetime import datetime
 from dominate.tags import *
 from fundrive import GithubDrive
 from funfile import funos
-from funread.legado.manage.download.book import BookSourceDownload
+from funread.legado.manage.download.rss import RSSSourceDownload
 from funsecret import read_secret
 from funtask import Task
 
@@ -151,7 +151,7 @@ class GenerateSourceType:
 
     def split_and_upload(self):
         path = read_secret(cate1='funread', cate2='cache', cate3='path', cate4='root')
-        with BookSourceDownload(path=path, cate1="rss") as runner:
+        with RSSSourceDownload(path=path, cate1="rss") as runner:
             funos.delete(runner.path_pkl)
             funos.delete(runner.path_bok)
             runner.loads_zip()
