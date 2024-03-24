@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime
-
+import traceback
 import pandas as pd
 import requests
 from funfile import pickle, funos
@@ -98,11 +98,12 @@ class DownloadSource(object):
                 data = pickle.load(data)
             elif data[0] == '[' or data[0] == '{':
                 data = json.loads(data)
-
+        
         for source in tqdm(data):
             try:
                 self.add_source(source, *args, **kwargs)
             except Exception as e:
+                traceback.print_exc()
                 print(e)
                 pass
 
