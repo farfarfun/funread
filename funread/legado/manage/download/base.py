@@ -138,7 +138,7 @@ class DownloadSource(object):
             for key in ('candidate', 'merged'):
                 for item in data[key][:3]:
                     source = item['source']
-                    source['bookSourceUrl'] = f"{source['bookSourceUrl']}#{item['md5_list'][0][:10]}"
+                    source['sourceUrl'] = f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
                     dd.append(source)
                     if len(dd) >= size:
                         yield dd
