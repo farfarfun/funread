@@ -51,5 +51,4 @@ class RSSSourceDownload(DownloadSource):
     def source_format(self, source):
         return RSSSourceFormat(source).run()
 
-    def add_source(self, source, *args, **kwargs):
-        pass
+    
