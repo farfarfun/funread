@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 
 class DownloadSource(object):
-    def __init__(self, path='./funread-hub', cate1='book', *args, **kwargs):
+    def __init__(self, path='./funread-hub', cate1='rss', *args, **kwargs):
         self.cate1 = cate1
         self.path_rot = f'{path}/{cate1}'
         self.path_bak = f'{path}/{cate1}/bak'
@@ -31,7 +31,6 @@ class DownloadSource(object):
 
     def loads(self):
         print("loads")
-
         if os.path.exists(self.pkl_url):
             df = pd.read_pickle(self.pkl_url, compression='infer')
             self.url_map = {k: v for k, v in df.values}
@@ -65,7 +64,7 @@ class DownloadSource(object):
     def add_source(self, source, *args, **kwargs):
         md5 = get_md5_str(json.dumps(source))
         source = self.source_format(source)
-        hostname = url_to_hostname(source['bookSourceUrl'])
+        hostname = url_to_hostname(source['sourceUrl'])
         if hostname is None:
             return
         url_id = self.url_index(hostname)
@@ -80,9 +79,7 @@ class DownloadSource(object):
             "url_id": url_id,
             "hostname": hostname,
             "cate1": cate1
-
         }
-        source['bookSourceGroup'] = str(url_id)
         self.add_source_to_candidate(md5, fpath, source, url_info=url_info)
 
         self.md5_set[md5] = {
