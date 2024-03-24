@@ -151,7 +151,7 @@ class GenerateSourceType:
 
     def split_and_upload(self):
         path = read_secret(cate1='funread', cate2='cache', cate3='path', cate4='root')
-        with BookSourceDownload(path=path, cate1="book") as runner:
+        with BookSourceDownload(path=path, cate1="rss") as runner:
             funos.delete(runner.path_pkl)
             funos.delete(runner.path_bok)
             runner.loads_zip()
@@ -176,11 +176,12 @@ class GenerateSourceTask(Task):
         self.drive.login(repo_str=self.repo_str)
         super(GenerateSourceTask, self).__init__(*args, **kwargs)
 
-    def run(self, *args, **kwargs):
+    def run_book(self, *args, **kwargs):
         generate_source = GenerateSourceType(source_type="booksource", dir_path=f"{self.dir_path}/book")
         generate_source.split_and_upload()
         generate_source.update_rss()
 
-    def update_rss(self):
-        generate_source = GenerateSourceType(source_type="booksource", dir_path=f"{self.dir_path}/book")
+    def run_rss(self, *args, **kwargs):
+        generate_source = GenerateSourceType(source_type="rsssource", dir_path=f"{self.dir_path}/rss")
+        generate_source.split_and_upload()
         generate_source.update_rss()
