@@ -103,6 +103,7 @@ class DownloadSource(object):
             try:
                 self.add_source(source, *args, **kwargs)
             except Exception as e:
+                print(e)
                 pass
 
     def add_source_to_candidate(self, md5, fpath, source, url_info=None):
