@@ -12,14 +12,14 @@ from tqdm import tqdm
 
 
 class DownloadSource(object):
-    def __init__(self, path='./funread-hub', cate1='rss', *args, **kwargs):
+    def __init__(self, path="./funread-hub", cate1="rss", *args, **kwargs):
         self.cate1 = cate1
-        self.path_rot = f'{path}/{cate1}'
-        self.path_bak = f'{path}/{cate1}/bak'
-        self.path_pkl = f'{path}/{cate1}/pkl'
-        self.path_bok = f'{path}/{cate1}/source'
+        self.path_rot = f"{path}/{cate1}"
+        self.path_bak = f"{path}/{cate1}/bak"
+        self.path_pkl = f"{path}/{cate1}/pkl"
+        self.path_bok = f"{path}/{cate1}/source"
         self.pkl_url = f"{self.path_pkl}/url_info.pkl.bz2"
-        self.pkl_md5 = f'{self.path_pkl}/source_info.pkl.bz2'
+        self.pkl_md5 = f"{self.path_pkl}/source_info.pkl.bz2"
 
         self.url_map = {}
         self.md5_set = {}
@@ -32,23 +32,23 @@ class DownloadSource(object):
     def loads(self):
         print("loads")
         if os.path.exists(self.pkl_url):
-            df = pd.read_pickle(self.pkl_url, compression='infer')
+            df = pd.read_pickle(self.pkl_url, compression="infer")
             self.url_map = {k: v for k, v in df.values}
         else:
             self.url_map = {"https://farfarfun.github.com": 100000}
         self.current_id = max(self.url_map.values())
         if os.path.exists(self.pkl_md5):
-            df = pd.read_pickle(self.pkl_md5, compression='infer')
-            self.md5_set = {info['md5']: info for info in df.to_dict(orient='records')}
+            df = pd.read_pickle(self.pkl_md5, compression="infer")
+            self.md5_set = {info["md5"]: info for info in df.to_dict(orient="records")}
 
     def dumps(self):
         print("dumps")
 
         df = pd.DataFrame([{"url": k, "url_id": v} for k, v in self.url_map.items()])
-        df.to_pickle(self.pkl_url, compression='infer')
+        df.to_pickle(self.pkl_url, compression="infer")
 
         df = pd.DataFrame(self.md5_set.values())
-        df.to_pickle(self.pkl_md5, compression='infer')
+        df.to_pickle(self.pkl_md5, compression="infer")
 
     def url_index(self, url):
         if url in self.url_map:
@@ -64,7 +64,7 @@ class DownloadSource(object):
     def add_source(self, source, *args, **kwargs):
         md5 = get_md5_str(json.dumps(source))
         source = self.source_format(source)
-        hostname = url_to_hostname(source['sourceUrl'])
+        hostname = url_to_hostname(source["sourceUrl"])
         if hostname is None:
             return
         url_id = self.url_index(hostname)
@@ -75,11 +75,7 @@ class DownloadSource(object):
             os.makedirs(fdir)
         fpath = f"{fdir}/{url_id}.json"
 
-        url_info = {
-            "url_id": url_id,
-            "hostname": hostname,
-            "cate1": cate1
-        }
+        url_info = {"url_id": url_id, "hostname": hostname, "cate1": cate1}
         self.add_source_to_candidate(md5, fpath, source, url_info=url_info)
 
         self.md5_set[md5] = {
@@ -90,37 +86,43 @@ class DownloadSource(object):
         }
 
     def add_sources(self, data, *args, **kwargs):
-        ""
+        """"""
         if isinstance(data, str):
             if data.startswith("http"):
                 data = requests.get(data).json()
             elif os.path.exists(data):
                 data = pickle.load(data)
-            elif data[0] == '[' or data[0] == '{':
+            elif data[0] == "[" or data[0] == "{":
                 data = json.loads(data)
-        
+
         for source in tqdm(data):
             try:
                 self.add_source(source, *args, **kwargs)
             except Exception as e:
-                #traceback.print_exc()
-                #print(e)
+                # traceback.print_exc()
+                # print(e)
                 pass
 
     def add_source_to_candidate(self, md5, fpath, source, url_info=None):
         url_info = url_info or {}
         if os.path.exists(fpath):
-            data = json.loads(open(fpath, 'r').read())
+            data = json.loads(open(fpath, "r").read())
         else:
             data = {
-                "merged": [], "candidate": [],
+                "available": True,
+                "merged": [],
+                "candidate": [],
                 "url_id": url_info["url_id"],
                 "hostname": url_info["hostname"],
             }
         md5_list = []
-        [[md5_list.extend(md5["md5_list"]) for md5 in data[key]] for key in ('merged', 'candidate') if key in data]
+        [
+            [md5_list.extend(md5["md5_list"]) for md5 in data[key]]
+            for key in ("merged", "candidate")
+            if key in data
+        ]
         if md5 not in md5_list:
-            data['candidate'].append({"md5_list": [md5], "source": source})
+            data["candidate"].append({"md5_list": [md5], "source": source})
 
         with open(fpath, "w") as fw:
             fw.write(json.dumps(data, sort_keys=True, indent=4))
@@ -129,16 +131,20 @@ class DownloadSource(object):
         file_list = []
         for root, dirs, files in os.walk(self.path_bok):
             for file in files:
-                if file.endswith('.json'):
+                if file.endswith(".json"):
                     file_list.append(os.path.join(root, file))
         dd = []
         for file in tqdm(file_list):
-            data = open(file, 'r').read()
+            data = open(file, "r").read()
             data = json.loads(data)
-            for key in ('candidate', 'merged'):
+            if not data.get("available", True):
+                continue
+            for key in ("candidate", "merged"):
                 for item in data[key][:3]:
-                    source = item['source']
-                    source['sourceUrl'] = f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
+                    source = item["source"]
+                    source["sourceUrl"] = (
+                        f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
+                    )
                     dd.append(source)
                     if len(dd) >= size:
                         yield dd
