@@ -1,11 +1,14 @@
+import os.path
 from datetime import datetime
 
 from dominate.tags import *
 from fundrive import GithubDrive
 from funfile import funos
-from funread.legado.manage.download.rss import RSSSourceDownload
 from funsecret import read_secret
 from funtask import Task
+from tqdm import tqdm
+
+from funread.legado.manage.download.rss import RSSSourceDownload
 
 """
 dominate example: https://blog.csdn.net/wumingxiaoyao/article/details/122894671
@@ -29,12 +32,18 @@ class GenerateCommon:
             self.generate_build_repo("fundrive", "farfarfun/fundrive")
             self.generate_build_repo("funread", "farfarfun/funread")
             with li("订阅源:"):
-                a("github",
-                  href="yuedu://rssSource/importonline?src=https://github.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json")
-                a("gitee",
-                  href="yuedu://rssSource/importonline?src=https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json")
-                a("gitlink",
-                  href="yuedu://rssSource/importonline?src=https://gitlink.org.cn/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json")
+                a(
+                    "github",
+                    href="yuedu://rssSource/importonline?src=https://github.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+                )
+                a(
+                    "gitee",
+                    href="yuedu://rssSource/importonline?src=https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+                )
+                a(
+                    "gitlink",
+                    href="yuedu://rssSource/importonline?src=https://gitlink.org.cn/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+                )
 
     def generate(self):
         br()
@@ -150,7 +159,17 @@ class GenerateSourceType:
         return html_root.render()
 
     def split_and_upload(self):
-        path = read_secret(cate1='funread', cate2='cache', cate3='path', cate4='root')
+        path = read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
+        with RSSSourceDownload(path=path, cate1="rss") as runner:
+            runner.loads_zip()
+            for file in tqdm(os.listdir(path)):
+                filepath = os.path.join(path, file)
+                try:
+                    runner.add_sources(open(filepath, "r").read())
+                except Exception as e:
+                    print(e)
+            runner.dumps_zip()
+
         with RSSSourceDownload(path=path, cate1="rss") as runner:
             funos.delete(runner.path_pkl)
             funos.delete(runner.path_bok)
@@ -168,7 +187,7 @@ class GenerateSourceType:
 
 
 class GenerateSourceTask(Task):
-    def __init__(self, dir_path=f"funread/legado/snapshot/lasted", source_type="booksource", *args, **kwargs):
+    def __init__(self, dir_path="funread/legado/snapshot/lasted", source_type="booksource", *args, **kwargs):
         self.repo_str = "farfarfun/funread-cache"
         self.dir_path = dir_path
         self.source_type = source_type
