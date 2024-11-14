@@ -3,11 +3,13 @@ import os
 import re
 
 import requests
+from funfake.headers import Headers
 from funfile import funos
-from funread.legado.manage.download.base import DownloadSource
 from funsecret import get_md5_str
 from funutil import getLogger
 from tqdm import tqdm
+
+from funread.legado.manage.download.base import DownloadSource
 
 logger = getLogger("funread")
 
@@ -62,6 +64,7 @@ class RSSSourceDownload(DownloadSource):
         return RSSSourceFormat(source).run()
 
     def rss_download(self):
+        faker = Headers()
         urls = [
             "https://jt12.de/SYV2_4/2024/03/04/20/48/54/170955653465e5c33680046.json",
             "https://jt12.de/SYV2/2023/03/17/0/02/42/167898256264133da2869d4.json",
@@ -81,7 +84,7 @@ class RSSSourceDownload(DownloadSource):
             if index > size and os.path.exists(file):
                 continue
             try:
-                data = json.dumps(requests.get(url).json())
+                data = json.dumps(requests.get(url, headers=faker.generate()).json())
                 with open(file, "w") as fw:
                     fw.write(data)
             except Exception as e:
