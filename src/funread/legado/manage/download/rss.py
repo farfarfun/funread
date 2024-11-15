@@ -3,10 +3,11 @@ import traceback
 
 import requests
 from funfake.headers import Headers
-from funread.legado.manage.download.base import DownloadSource
 from funutil import getLogger
 from funutil.cache import disk_cache
 from tqdm import tqdm
+
+from funread.legado.manage.download.base import DownloadSource
 
 logger = getLogger("funread")
 
@@ -63,11 +64,7 @@ class RSSSourceDownload(DownloadSource):
         return RSSSourceFormat(source).run()
 
     def loader(self):
-        urls = [
-            "https://jt12.de/SYV2_4/2024/03/04/20/48/54/170955653465e5c33680046.json",
-            "https://jt12.de/SYV2/2023/03/17/0/02/42/167898256264133da2869d4.json",
-            "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
-        ]
+        urls = [            "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",        ]
         urls.extend([f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 50)])
         urls.extend([f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)])
 
