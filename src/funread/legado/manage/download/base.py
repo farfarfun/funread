@@ -158,7 +158,7 @@ class DownloadSource(object):
         if zip_file is None:
             files = os.listdir(self.path_bak)
             files.sort(key=lambda x: x)
-            if len(zip_file) == 0:
+            if len(files) == 0:
                 logger.warning("zip empty")
                 return
         zip_file = os.path.join(self.path_bak, files[-1])
