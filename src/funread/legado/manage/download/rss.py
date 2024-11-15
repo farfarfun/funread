@@ -64,11 +64,14 @@ class RSSSourceDownload(DownloadSource):
         return RSSSourceFormat(source).run()
 
     def loader(self):
-        urls = [            "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",        ]
+        urls = [
+            "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
+        ]
         urls.extend([f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 50)])
         urls.extend([f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)])
 
         cache_path = f"{self.path_rot}/../cache"
+        logger.info(f"cache_path:{cache_path}")
 
         @disk_cache(cache_key=cache_path, expire=3600 * 24)
         def load_data(url: str) -> dict:
