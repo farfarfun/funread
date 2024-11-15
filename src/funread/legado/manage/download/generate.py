@@ -161,14 +161,8 @@ class GenerateSourceType:
     def split_and_upload(self):
         path = read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
         with RSSSourceDownload(path=path, cate1="rss") as runner:
-            runner.loads_zip()
+            # runner.loads_zip()
             runner.loader()
-            for file in tqdm(os.listdir(path)):
-                filepath = os.path.join(path, file)
-                try:
-                    runner.add_sources(open(filepath, "r").read())
-                except Exception as e:
-                    print(e)
             runner.dumps_zip()
 
         with RSSSourceDownload(path=path, cate1="rss") as runner:
