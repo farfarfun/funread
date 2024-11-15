@@ -169,6 +169,8 @@ class DownloadSource(object):
 
     def dumps_zip(self):
         self.dumps()
+        funos.makedirs(self.path_pkl)
+        funos.makedirs(self.path_bok)
         zip_file = f"{self.path_bak}/{self.cate1}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.xz"
         logger.info(f"dump zip file to {zip_file}")
         with tarfile.open(zip_file, "w|xz") as tar:

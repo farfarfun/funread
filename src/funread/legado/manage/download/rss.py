@@ -81,5 +81,5 @@ class RSSSourceDownload(DownloadSource):
                 logger.error(f"error: {e},traceback: {traceback.format_exc()}")
                 return {}
 
-        for _url in tqdm(urls, total=len(urls)):
+        for _url in tqdm(urls):
             self.add_sources(load_data(_url))
