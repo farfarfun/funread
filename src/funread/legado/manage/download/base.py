@@ -146,6 +146,8 @@ class DownloadSource(object):
 
     def dumps(self):
         logger.info("dumps")
+        funos.makedirs(self.path_pkl)
+        funos.makedirs(self.path_bok)
         df = pd.DataFrame([{"url": k, "url_id": v} for k, v in self.url_map.items()])
         df.to_pickle(self.pkl_url, compression="infer")
 
