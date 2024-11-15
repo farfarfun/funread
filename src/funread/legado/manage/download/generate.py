@@ -162,7 +162,7 @@ class GenerateSourceType:
         path = read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
         with RSSSourceDownload(path=path, cate1="rss") as runner:
             runner.loads_zip()
-            runner.rss_download()
+            runner.loader()
             for file in tqdm(os.listdir(path)):
                 filepath = os.path.join(path, file)
                 try:
