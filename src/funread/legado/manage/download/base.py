@@ -1,14 +1,18 @@
 import json
 import os
-from datetime import datetime
 import traceback
+from datetime import datetime
+
 import pandas as pd
 import requests
 from funfile import pickle, funos
 from funfile.compress import tarfile
 from funread.legado.manage.utils import url_to_hostname
 from funsecret import get_md5_str
+from funutil import getLogger
 from tqdm import tqdm
+
+logger = getLogger('funread')
 
 
 class DownloadSource(object):
@@ -29,26 +33,11 @@ class DownloadSource(object):
         funos.makedirs(self.path_bok)
         funos.makedirs(self.path_pkl)
 
-    def loads(self):
-        print("loads")
-        if os.path.exists(self.pkl_url):
-            df = pd.read_pickle(self.pkl_url, compression="infer")
-            self.url_map = {k: v for k, v in df.values}
-        else:
-            self.url_map = {"https://farfarfun.github.com": 100000}
-        self.current_id = max(self.url_map.values())
-        if os.path.exists(self.pkl_md5):
-            df = pd.read_pickle(self.pkl_md5, compression="infer")
-            self.md5_set = {info["md5"]: info for info in df.to_dict(orient="records")}
+    def loader(self):
+        raise NotImplementedError
 
-    def dumps(self):
-        print("dumps")
-
-        df = pd.DataFrame([{"url": k, "url_id": v} for k, v in self.url_map.items()])
-        df.to_pickle(self.pkl_url, compression="infer")
-
-        df = pd.DataFrame(self.md5_set.values())
-        df.to_pickle(self.pkl_md5, compression="infer")
+    def source_format(self, source):
+        raise NotImplementedError
 
     def url_index(self, url):
         if url in self.url_map:
@@ -58,8 +47,30 @@ class DownloadSource(object):
             self.url_map[url] = self.current_id
             return self.current_id
 
-    def source_format(self, source):
-        pass
+    @staticmethod
+    def add_source_to_candidate(md5, fpath, source, url_info=None):
+        url_info = url_info or {}
+        if os.path.exists(fpath):
+            data = json.loads(open(fpath, "r").read())
+        else:
+            data = {
+                "available": True,
+                "merged": [],
+                "candidate": [],
+                "url_id": url_info["url_id"],
+                "hostname": url_info["hostname"],
+            }
+        md5_list = []
+        [
+            [md5_list.extend(md5["md5_list"]) for md5 in data[key]]
+            for key in ("merged", "candidate")
+            if key in data
+        ]
+        if md5 not in md5_list:
+            data["candidate"].append({"md5_list": [md5], "source": source})
+
+        with open(fpath, "w") as fw:
+            fw.write(json.dumps(data, sort_keys=True, indent=4))
 
     def add_source(self, source, *args, **kwargs):
         md5 = get_md5_str(json.dumps(source))
@@ -99,33 +110,7 @@ class DownloadSource(object):
             try:
                 self.add_source(source, *args, **kwargs)
             except Exception as e:
-                # traceback.print_exc()
-                # print(e)
-                pass
-
-    def add_source_to_candidate(self, md5, fpath, source, url_info=None):
-        url_info = url_info or {}
-        if os.path.exists(fpath):
-            data = json.loads(open(fpath, "r").read())
-        else:
-            data = {
-                "available": True,
-                "merged": [],
-                "candidate": [],
-                "url_id": url_info["url_id"],
-                "hostname": url_info["hostname"],
-            }
-        md5_list = []
-        [
-            [md5_list.extend(md5["md5_list"]) for md5 in data[key]]
-            for key in ("merged", "candidate")
-            if key in data
-        ]
-        if md5 not in md5_list:
-            data["candidate"].append({"md5_list": [md5], "source": source})
-
-        with open(fpath, "w") as fw:
-            fw.write(json.dumps(data, sort_keys=True, indent=4))
+                logger.error(f"error: {e},traceback: {traceback.format_exc()}")
 
     def export_sources(self, size=1000):
         file_list = []
@@ -151,6 +136,27 @@ class DownloadSource(object):
                         dd = []
         yield dd
 
+    def loads(self):
+        logger.info("loads")
+
+        if os.path.exists(self.pkl_url):
+            df = pd.read_pickle(self.pkl_url, compression="infer")
+            self.url_map = {k: v for k, v in df.values}
+        else:
+            self.url_map = {"https://farfarfun.github.com": 100000}
+        self.current_id = max(self.url_map.values())
+        if os.path.exists(self.pkl_md5):
+            df = pd.read_pickle(self.pkl_md5, compression="infer")
+            self.md5_set = {info["md5"]: info for info in df.to_dict(orient="records")}
+
+    def dumps(self):
+        logger.info("dumps")
+        df = pd.DataFrame([{"url": k, "url_id": v} for k, v in self.url_map.items()])
+        df.to_pickle(self.pkl_url, compression="infer")
+
+        df = pd.DataFrame(self.md5_set.values())
+        df.to_pickle(self.pkl_md5, compression="infer")
+
     def loads_zip(self, zip_file=None):
         funos.delete(self.path_pkl)
         funos.delete(self.path_bok)
@@ -158,7 +164,7 @@ class DownloadSource(object):
             files = os.listdir(self.path_bak)
             files.sort(key=lambda x: x)
             zip_file = os.path.join(self.path_bak, files[-1])
-        print(f"load zip file from {zip_file}")
+        logger.info(f"load zip file from {zip_file}")
         with tarfile.open(zip_file, "r") as tar:
             tar.extractall(self.path_rot)
         self.loads()
@@ -166,6 +172,7 @@ class DownloadSource(object):
     def dumps_zip(self):
         self.dumps()
         zip_file = f"{self.path_bak}/{self.cate1}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.xz"
+        logger.info(f"dump zip file to {zip_file}")
         with tarfile.open(zip_file, "w|xz") as tar:
             tar.add(self.path_pkl, arcname=os.path.basename(self.path_pkl))
             tar.add(self.path_bok, arcname=os.path.basename(self.path_bok))
