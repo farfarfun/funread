@@ -1,17 +1,16 @@
-import json
-import os
 import re
+import traceback
 
 import requests
 from funfake.headers import Headers
-from funfile import funos
-from funsecret import get_md5_str
+from funread.legado.manage.download.base import DownloadSource
 from funutil import getLogger
+from funutil.cache import disk_cache
 from tqdm import tqdm
 
-from funread.legado.manage.download.base import DownloadSource
-
 logger = getLogger("funread")
+
+faker = Headers()
 
 
 def retain_zh_ch_dig(text):
@@ -63,29 +62,24 @@ class RSSSourceDownload(DownloadSource):
     def source_format(self, source):
         return RSSSourceFormat(source).run()
 
-    def rss_download(self):
-        faker = Headers()
+    def loader(self):
         urls = [
             "https://jt12.de/SYV2_4/2024/03/04/20/48/54/170955653465e5c33680046.json",
             "https://jt12.de/SYV2/2023/03/17/0/02/42/167898256264133da2869d4.json",
             "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
         ]
-        size = len(urls)
-        for uri in ("https://www.yckceo.com",):
-            for _id in tqdm(range(0, 50), desc=uri):
-                urls.append(f"{uri}/yuedu/rsss/json/id/{_id}.json")
-            for _id in tqdm(range(0, 500), desc=uri):
-                urls.append(f"{uri}/yuedu/rss/json/id/{_id}.json")
+        urls.extend([f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 50)])
+        urls.extend([f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)])
 
         cache_path = f"{self.path_rot}/../cache"
-        funos.makedirs(cache_path)
-        for index, url in tqdm(enumerate(urls), total=len(urls)):
-            file = f"{cache_path}/{get_md5_str(url)}.json"
-            if index > size and os.path.exists(file):
-                continue
+
+        @disk_cache(cache_key=cache_path, expire=3600 * 24)
+        def load_data(url: str) -> dict:
             try:
-                data = json.dumps(requests.get(url, headers=faker.generate()).json())
-                with open(file, "w") as fw:
-                    fw.write(data)
+                return requests.get(url, headers=faker.generate()).json()
             except Exception as e:
-                logger.error(f"Failed to download {url}: {e}")
+                logger.error(f"error: {e},traceback: {traceback.format_exc()}")
+                return {}
+
+        for _url in tqdm(urls, total=len(urls)):
+            self.add_sources(load_data(_url))
