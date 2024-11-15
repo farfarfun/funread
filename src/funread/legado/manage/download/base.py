@@ -158,10 +158,10 @@ class DownloadSource(object):
         if zip_file is None:
             files = os.listdir(self.path_bak)
             files.sort(key=lambda x: x)
-            zip_file = os.path.join(self.path_bak, files[-1])
-        if len(zip_file) == 0:
-            logger.warning("zip empty")
-            return
+            if len(zip_file) == 0:
+                logger.warning("zip empty")
+                return
+        zip_file = os.path.join(self.path_bak, files[-1])
         logger.info(f"load zip file from {zip_file}")
         with tarfile.open(zip_file, "r") as tar:
             tar.extractall(self.path_rot)
