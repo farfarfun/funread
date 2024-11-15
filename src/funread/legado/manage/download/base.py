@@ -5,14 +5,15 @@ from datetime import datetime
 
 import pandas as pd
 import requests
-from funfile import pickle, funos
+from funfile import funos, pickle
 from funfile.compress import tarfile
-from funread.legado.manage.utils import url_to_hostname
 from funsecret import get_md5_str
 from funutil import getLogger
 from tqdm import tqdm
 
-logger = getLogger('funread')
+from funread.legado.manage.utils import url_to_hostname
+
+logger = getLogger("funread")
 
 
 class DownloadSource(object):
@@ -61,11 +62,7 @@ class DownloadSource(object):
                 "hostname": url_info["hostname"],
             }
         md5_list = []
-        [
-            [md5_list.extend(md5["md5_list"]) for md5 in data[key]]
-            for key in ("merged", "candidate")
-            if key in data
-        ]
+        [[md5_list.extend(md5["md5_list"]) for md5 in data[key]] for key in ("merged", "candidate") if key in data]
         if md5 not in md5_list:
             data["candidate"].append({"md5_list": [md5], "source": source})
 
@@ -127,9 +124,7 @@ class DownloadSource(object):
             for key in ("candidate", "merged"):
                 for item in data[key][:3]:
                     source = item["source"]
-                    source["sourceUrl"] = (
-                        f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
-                    )
+                    source["sourceUrl"] = f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
                     dd.append(source)
                     if len(dd) >= size:
                         yield dd
@@ -164,6 +159,9 @@ class DownloadSource(object):
             files = os.listdir(self.path_bak)
             files.sort(key=lambda x: x)
             zip_file = os.path.join(self.path_bak, files[-1])
+        if len(zip_file) == 0:
+            logger.warning("zip empty")
+            return
         logger.info(f"load zip file from {zip_file}")
         with tarfile.open(zip_file, "r") as tar:
             tar.extractall(self.path_rot)
