@@ -79,8 +79,7 @@ class DownloadSource(object):
 
         cate1 = (url_id // 100) * 100
         fdir = f"{self.path_bok}/{cate1}-{cate1 + 100}/"
-        if not os.path.exists(fdir):
-            os.makedirs(fdir)
+        funos.makedirs(fdir)
         fpath = f"{fdir}/{url_id}.json"
 
         url_info = {"url_id": url_id, "hostname": hostname, "cate1": cate1}
