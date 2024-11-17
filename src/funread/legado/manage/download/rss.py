@@ -73,12 +73,12 @@ class RSSSourceDownload(DownloadSource):
         cache_path = f"{self.path_rot}/../cache"
         logger.info(f"cache_path:{cache_path}")
 
-        @disk_cache(cache_key='url', cache_dir=cache_path, expire=3600 * 24)
+        @disk_cache(cache_key="url", cache_dir=cache_path, expire=3600 * 24)
         def load_data(url: str) -> dict:
             try:
                 return requests.get(url, headers=faker.generate()).json()
             except Exception as e:
-                logger.error(f"error: {e},traceback: {traceback.format_exc()}")
+                # logger.error(f"error: {e},traceback: {traceback.format_exc()}")
                 return {}
 
         for _url in tqdm(urls):
