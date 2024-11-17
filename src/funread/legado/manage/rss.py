@@ -40,7 +40,9 @@ class UpdateRssTask(Task):
 
         dl.append({"title": "开源阅读-语雀文档", "url": "https://www.yuque.com/legado"})
         dl.append({"title": "喵公子书源", "url": "http://yuedu.miaogongzi.net/gx.html"})
-        dl.append({"title": "「阅读」APP 源-aoaostar", "url": "https://legado.aoaostar.com/"})
+        dl.append(
+            {"title": "「阅读」APP 源-aoaostar", "url": "https://legado.aoaostar.com/"}
+        )
         dl.append({"title": "yiove", "url": "https://shuyuan.yiove.com/"})
 
         #
@@ -83,7 +85,9 @@ class UpdateRssTask(Task):
                 "enabled": True,
             }
         ]
-        self.drive.upload_file(git_path="funread/legado/snapshot/lasted/funread.json", content=data2)
+        self.drive.upload_file(
+            git_path="funread/legado/snapshot/lasted/funread.json", content=data2
+        )
 
     def run(self):
         self.update_book()

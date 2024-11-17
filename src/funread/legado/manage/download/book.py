@@ -9,7 +9,6 @@ def retain_zh_ch_dig(text):
 
 class BookSourceFormat:
     def __init__(self, source):
-
         self.source = source
         self.source["bookSourceComment"] = ""
         self.source["bookSourceUrl"] = self.source["bookSourceUrl"].rstrip("/|#")
@@ -27,14 +26,16 @@ class BookSourceFormat:
         self.format_toc()
         keys = [key for key in self.source.keys() if not self.source[key]]
         for key in keys:
-                self.source.pop(key)
-
-        for key in ['customOrder','respondTime','lastUpdateTime']:
             self.source.pop(key)
 
-        for key in ['searchUrl','exploreUrl']:
+        for key in ["customOrder", "respondTime", "lastUpdateTime"]:
+            self.source.pop(key)
+
+        for key in ["searchUrl", "exploreUrl"]:
             if key in self.source.keys():
-                self.source[key]=self.source[key].replace(self.source['bookSourceUrl'],'')
+                self.source[key] = self.source[key].replace(
+                    self.source["bookSourceUrl"], ""
+                )
         return self.source
 
     def __format_base(self, group, map):

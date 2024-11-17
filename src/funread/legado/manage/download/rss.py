@@ -40,7 +40,9 @@ class RSSSourceFormat:
 
         for key in ["searchUrl", "exploreUrl"]:
             if key in self.source.keys():
-                self.source[key] = self.source[key].replace(self.source["bookSourceUrl"], "")
+                self.source[key] = self.source[key].replace(
+                    self.source["bookSourceUrl"], ""
+                )
         return self.source
 
     def __format_base(self, group, map):
@@ -67,8 +69,18 @@ class RSSSourceDownload(DownloadSource):
         urls = [
             "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
         ]
-        urls.extend([f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 50)])
-        urls.extend([f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)])
+        urls.extend(
+            [
+                f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json"
+                for _id in range(0, 50)
+            ]
+        )
+        urls.extend(
+            [
+                f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json"
+                for _id in range(0, 500)
+            ]
+        )
 
         cache_path = f"{self.path_rot}/../cache"
         logger.info(f"cache_path:{cache_path}")

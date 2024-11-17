@@ -51,7 +51,9 @@ class GenerateCommon:
         div(hr(size=2, alignment="center", width="100%"))
         div((b(font("Cause: Started by upstream pipeline job "))))
         self.generate_org()
-        img(src="https://profile-avatar.csdnimg.cn/2e9aaf5666c044d7aa273e086f9878d0_n1007530194.jpg")
+        img(
+            src="https://profile-avatar.csdnimg.cn/2e9aaf5666c044d7aa273e086f9878d0_n1007530194.jpg"
+        )
         br()
         p("** This is an automatically generated email by jenkins job. **")
         p("Feel free to connect 1007530194@qq.com if you have any question.")
@@ -101,7 +103,9 @@ class GenerateSourceType:
             }
         """
 
-    def __init__(self, dir_path="funread/legado/book/snapshot/20231011", source_type="booksource"):
+    def __init__(
+        self, dir_path="funread/legado/book/snapshot/20231011", source_type="booksource"
+    ):
         self.repo_str = "farfarfun/funread-cache"
         self.dir_path = dir_path
         self.source_type = source_type
@@ -172,17 +176,27 @@ class GenerateSourceType:
             i = 1000
             for data in runner.export_sources(size=3000):
                 if len(data) > 0:
-                    self.drive.upload_file(content=data, git_path=f"{self.dir_path}/progress-{i}.json")
+                    self.drive.upload_file(
+                        content=data, git_path=f"{self.dir_path}/progress-{i}.json"
+                    )
                     i += 1
 
     def update_rss(self):
         print("update source rss")
-        self.drive.upload_file(git_path=f"{self.dir_path}/index.html", content=self.generate_html_report())
+        self.drive.upload_file(
+            git_path=f"{self.dir_path}/index.html", content=self.generate_html_report()
+        )
         print(len(self.generate_html_report()))
 
 
 class GenerateSourceTask(Task):
-    def __init__(self, dir_path="funread/legado/snapshot/lasted", source_type="booksource", *args, **kwargs):
+    def __init__(
+        self,
+        dir_path="funread/legado/snapshot/lasted",
+        source_type="booksource",
+        *args,
+        **kwargs,
+    ):
         self.repo_str = "farfarfun/funread-cache"
         self.dir_path = dir_path
         self.source_type = source_type
@@ -191,11 +205,15 @@ class GenerateSourceTask(Task):
         super(GenerateSourceTask, self).__init__(*args, **kwargs)
 
     def run_book(self, *args, **kwargs):
-        generate_source = GenerateSourceType(source_type="booksource", dir_path=f"{self.dir_path}/book")
+        generate_source = GenerateSourceType(
+            source_type="booksource", dir_path=f"{self.dir_path}/book"
+        )
         generate_source.split_and_upload()
         generate_source.update_rss()
 
     def run_rss(self, *args, **kwargs):
-        generate_source = GenerateSourceType(source_type="rsssource", dir_path=f"{self.dir_path}/rss")
+        generate_source = GenerateSourceType(
+            source_type="rsssource", dir_path=f"{self.dir_path}/rss"
+        )
         generate_source.split_and_upload()
         generate_source.update_rss()

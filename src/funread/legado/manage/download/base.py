@@ -62,7 +62,11 @@ class DownloadSource(object):
                 "hostname": url_info["hostname"],
             }
         md5_list = []
-        [[md5_list.extend(md5["md5_list"]) for md5 in data[key]] for key in ("merged", "candidate") if key in data]
+        [
+            [md5_list.extend(md5["md5_list"]) for md5 in data[key]]
+            for key in ("merged", "candidate")
+            if key in data
+        ]
         if md5 not in md5_list:
             data["candidate"].append({"md5_list": [md5], "source": source})
 
@@ -123,7 +127,9 @@ class DownloadSource(object):
             for key in ("candidate", "merged"):
                 for item in data[key][:3]:
                     source = item["source"]
-                    source["sourceUrl"] = f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
+                    source["sourceUrl"] = (
+                        f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
+                    )
                     dd.append(source)
                     if len(dd) >= size:
                         yield dd
