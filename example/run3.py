@@ -12,9 +12,7 @@ def run1():
     task.snapshot_download()
     task.url_manage.delete_all()
     # task.add_book_source("https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan")
-    task.add_rss_source(
-        "https://jt12.de/SYV2/2023/03/17/0/02/42/167898256264133da2869d4.json"
-    )
+    task.add_rss_source("https://jt12.de/SYV2/2023/03/17/0/02/42/167898256264133da2869d4.json")
     task.snapshot_upload()
 
 

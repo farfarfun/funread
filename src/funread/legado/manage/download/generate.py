@@ -57,7 +57,7 @@ class GenerateCommon:
         br()
         p("** This is an automatically generated email by jenkins job. **")
         p("Feel free to connect 1007530194@qq.com if you have any question.")
-        p(f'update time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        p(f"update time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 class GenerateSourceType:
@@ -103,9 +103,7 @@ class GenerateSourceType:
             }
         """
 
-    def __init__(
-        self, dir_path="funread/legado/book/snapshot/20231011", source_type="booksource"
-    ):
+    def __init__(self, dir_path="funread/legado/book/snapshot/20231011", source_type="booksource"):
         self.repo_str = "farfarfun/funread-cache"
         self.dir_path = dir_path
         self.source_type = source_type
@@ -156,7 +154,7 @@ class GenerateSourceType:
         with html_root.add(body()):
             hello_div = div(id="hello")
             hello_div.add(p("Hi All,"))
-            hello_div.add(p("This is today's " " API Test Report in "))
+            hello_div.add(p("This is today's  API Test Report in "))
             self.generate_table()
             GenerateCommon().generate()
 

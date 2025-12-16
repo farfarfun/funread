@@ -1,14 +1,21 @@
-import re
+"""书源下载和管理模块"""
+
+from typing import Any, Dict
 
 from funread.legado.manage.download.base import DownloadSource
-
-
-def retain_zh_ch_dig(text):
-    return re.sub("[^\u4e00-\u9fa5a-zA-Z0-9\[\]]+", "", text)
+from funread.legado.manage.utils import retain_zh_ch_dig
 
 
 class BookSourceFormat:
-    def __init__(self, source):
+    """书源格式化类，用于统一书源规则格式"""
+
+    def __init__(self, source: Dict[str, Any]):
+        """
+        初始化书源格式化器
+
+        Args:
+            source: 原始书源字典
+        """
         self.source = source
         self.source["bookSourceComment"] = ""
         self.source["bookSourceUrl"] = self.source["bookSourceUrl"].rstrip("/|#")
@@ -18,24 +25,33 @@ class BookSourceFormat:
         for key in ["bookSourceGroup", "bookSourceName"]:
             self.source[key] = retain_zh_ch_dig(self.source.get(key, ""))
 
-    def run(self):
+    def run(self) -> Dict[str, Any]:
+        """
+        执行完整的格式化流程
+
+        Returns:
+            格式化后的书源字典
+        """
         self.format_book_info()
         self.format_content()
         self.format_search()
         self.format_explore()
         self.format_toc()
-        keys = [key for key in self.source.keys() if not self.source[key]]
-        for key in keys:
+
+        # 移除空值字段
+        keys_to_remove = [key for key in self.source.keys() if not self.source[key]]
+        for key in keys_to_remove:
             self.source.pop(key)
 
+        # 移除不需要的字段
         for key in ["customOrder", "respondTime", "lastUpdateTime"]:
-            self.source.pop(key)
+            self.source.pop(key, None)
 
+        # 处理相对 URL
+        base_url = self.source.get("bookSourceUrl", "")
         for key in ["searchUrl", "exploreUrl"]:
-            if key in self.source.keys():
-                self.source[key] = self.source[key].replace(
-                    self.source["bookSourceUrl"], ""
-                )
+            if key in self.source and base_url:
+                self.source[key] = self.source[key].replace(base_url, "")
         return self.source
 
     def __format_base(self, group, map):
@@ -115,8 +131,16 @@ class BookSourceFormat:
 
 
 class BookSourceDownload(DownloadSource):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    """书源下载器，继承自 DownloadSource"""
 
-    def source_format(self, source):
+    def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        格式化书源
+
+        Args:
+            source: 原始书源字典
+
+        Returns:
+            格式化后的书源字典
+        """
         return BookSourceFormat(source).run()

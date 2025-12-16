@@ -1,7 +1,60 @@
 [project]
 name = "funread"
-version = "1.1.20"
-description = "Add your description here"
+version = "1.1.21"
+description = "一个用于管理和处理阅读源（Legado 阅读 APP 的书源和 RSS 源）的 Python 工具库"
 readme = "README.md"
 requires-python = ">=3.8"
+keywords = [ "legado", "reading", "book-source", "rss", "ebook",]
+classifiers = [ "Development Status :: 4 - Beta", "Intended Audience :: Developers", "License :: OSI Approved :: Apache Software License", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3.8", "Programming Language :: Python :: 3.9", "Programming Language :: Python :: 3.10", "Programming Language :: Python :: 3.11", "Topic :: Software Development :: Libraries :: Python Modules", "Topic :: Text Processing :: Markup",]
 dependencies = [ "dominate>=2.9.1", "funfile>=1.0.11", "funutil>=1.0.25",]
+[[project.authors]]
+name = "牛哥"
+email = "niuliangtao@qq.com"
+
+[[project.authors]]
+name = "farfarfun"
+email = "farfarfun@qq.com"
+
+[[project.maintainers]]
+name = "牛哥"
+email = "niuliangtao@qq.com"
+
+[[project.maintainers]]
+name = "farfarfun"
+email = "farfarfun@qq.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.license]
+text = "Apache-2.0"
+
+[project.optional-dependencies]
+dev = [ "pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0", "black>=23.0.0",]
+
+[project.urls]
+Organization = "https://github.com/farfarfun"
+Repository = "https://github.com/farfarfun/funread"
+Releases = "https://github.com/farfarfun/funread/releases"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.black]
+line-length = 100
+target-version = [ "py38",]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.setuptools]
+license-files = []
+
+[tool.ruff.lint]
+select = [ "E", "F", "I", "N", "W",]
+ignore = [ "E501",]
