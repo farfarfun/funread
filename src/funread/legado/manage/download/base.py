@@ -168,6 +168,8 @@ class DownloadSource:
             是否成功添加
         """
         try:
+            if len(source) == 0:
+                return False
             # 计算 MD5
             md5 = get_md5_str(json.dumps(source, sort_keys=True))
 
