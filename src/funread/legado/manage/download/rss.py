@@ -1,6 +1,5 @@
 """RSS 源下载和管理模块"""
 
-import traceback
 from typing import Any, Dict
 
 import requests
