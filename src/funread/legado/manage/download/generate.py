@@ -1,13 +1,10 @@
-import os.path
 from datetime import datetime
 
 from dominate.tags import *
-from fundrive import GithubDrive
+from fundrive.fungit import GithubDrive
 from funfile import funos
 from funsecret import read_secret
 from funtask import Task
-from tqdm import tqdm
-
 from funread.legado.manage.download.rss import RSSSourceDownload
 
 """
