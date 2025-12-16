@@ -167,9 +167,9 @@ class DownloadSource:
         Returns:
             是否成功添加
         """
+        if source is None or len(source) == 0 or "sourceUrl" not in source:
+            return False
         try:
-            if len(source) == 0 or "sourceUrl" not in source:
-                return False
             # 计算 MD5
             md5 = get_md5_str(json.dumps(source, sort_keys=True))
 

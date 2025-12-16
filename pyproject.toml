@@ -1,6 +1,6 @@
 [project]
 name = "funread"
-version = "1.1.26"
+version = "1.1.27"
 description = "一个用于管理和处理阅读源（Legado 阅读 APP 的书源和 RSS 源）的 Python 工具库"
 readme = "README.md"
 requires-python = ">=3.8"
