@@ -309,9 +309,12 @@ class DownloadSource:
                 for key in ("merged", "candidate"):
                     if key not in data:
                         continue
-                    if len(data[key]) == 0:
+                    _data = data[key]
+                    if len(_data) == 0:
                         continue
-                    for item in data[key][:3]:  # 每个文件最多取前3个
+                    if key == "candidate":
+                        _data = _data[:3]
+                    for item in data[key]:  # 每个文件最多取前3个
                         if "source" not in item or "md5_list" not in item:
                             continue
 
