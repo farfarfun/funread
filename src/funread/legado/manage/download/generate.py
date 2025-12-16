@@ -5,8 +5,11 @@ from fundrive.fungit import GithubDrive
 from funfile import funos
 from funsecret import read_secret
 from funtask import Task
+from funutil import getLogger
+
 from funread.legado.manage.download.rss import RSSSourceDownload
 
+logger = getLogger("funread")
 """
 dominate example: https://blog.csdn.net/wumingxiaoyao/article/details/122894671
 """
@@ -171,17 +174,18 @@ class GenerateSourceType:
             i = 1000
             for data in runner.export_sources(size=3000):
                 if len(data) > 0:
-                    self.drive.upload_file(
-                        content=data, git_path=f"{self.dir_path}/progress-{i}.json"
-                    )
+                    git_path = f"{self.dir_path}/progress-{i}.json"
+                    self.drive.upload_file(content=data, git_path=git_path)
                     i += 1
+                    logger.success(f"dump {len(data)} into {git_path}")
+                else:
+                    continue
 
     def update_rss(self):
-        print("update source rss")
+        logger.info("update source rss")
         self.drive.upload_file(
             git_path=f"{self.dir_path}/index.html", content=self.generate_html_report()
         )
-        print(len(self.generate_html_report()))
 
 
 class GenerateSourceTask(Task):
