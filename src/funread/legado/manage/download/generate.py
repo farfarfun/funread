@@ -172,7 +172,7 @@ class GenerateSourceType:
             funos.delete(runner.path_bok)
             runner.loads_zip()
             i = 1000
-            for data in runner.export_sources(size=100):
+            for data in runner.export_sources(size=500):
                 if len(data) > 0:
                     git_path = f"{self.dir_path}/progress-{i}.json"
                     self.drive.upload_file(content=data, git_path=git_path)
