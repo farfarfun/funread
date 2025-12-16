@@ -163,7 +163,7 @@ class GenerateSourceType:
     def split_and_upload(self):
         path = read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
         with RSSSourceDownload(path=path, cate1="rss") as runner:
-            # runner.loads_zip()
+            runner.loads_zip()
             runner.loader()
             runner.dumps_zip()
 
@@ -172,7 +172,7 @@ class GenerateSourceType:
             funos.delete(runner.path_bok)
             runner.loads_zip()
             i = 1000
-            for data in runner.export_sources(size=3000):
+            for data in runner.export_sources(size=100):
                 if len(data) > 0:
                     git_path = f"{self.dir_path}/progress-{i}.json"
                     self.drive.upload_file(content=data, git_path=git_path)

@@ -90,7 +90,7 @@ class RSSSourceDownload(DownloadSource):
             "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
         ]
         urls.extend(
-            [f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 50)]
+            [f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 250)]
         )
         urls.extend(
             [f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)]
