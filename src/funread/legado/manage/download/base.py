@@ -137,6 +137,12 @@ class DownloadSource:
                 "hostname": url_info.get("hostname", ""),
             }
 
+        # 订阅源是否是最终版本
+        data["final"] = False if "final" not in data else data["final"]
+
+        # 是最终版本，直接返回
+        if data["final"]:
+            return
         # 收集所有已存在的 MD5 值
         md5_list: List[str] = []
         for key in ("merged", "candidate"):
@@ -145,7 +151,7 @@ class DownloadSource:
                     if "md5_list" in item:
                         md5_list.extend(item["md5_list"])
 
-        # 如果 MD5 不存在，添加到候选列表
+        # 如果  MD5 不存在，添加到候选列表
         if md5 not in md5_list:
             data["candidate"].append({"md5_list": [md5], "source": source})
 
