@@ -141,7 +141,7 @@ class DownloadSource:
         data["final"] = False if "final" not in data else data["final"]
 
         # 是最终版本，直接返回
-        if data["final"]:
+        if data["final"] or not data["available"]:
             return
         # 收集所有已存在的 MD5 值
         md5_list: List[str] = []
