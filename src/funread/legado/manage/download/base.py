@@ -98,7 +98,10 @@ class DownloadSource:
 
     @staticmethod
     def add_source_to_candidate(
-        md5: str, fpath: str, source: Dict[str, Any], url_info: Optional[Dict[str, Any]] = None
+        md5: str,
+        fpath: str,
+        source: Dict[str, Any],
+        url_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         将源添加到候选列表
@@ -303,8 +306,10 @@ class DownloadSource:
                     continue
 
                 # 从候选和已合并列表中提取源
-                for key in ("candidate", "merged"):
+                for key in ("merged", "candidate"):
                     if key not in data:
+                        continue
+                    if len(data[key]) == 0:
                         continue
                     for item in data[key][:3]:  # 每个文件最多取前3个
                         if "source" not in item or "md5_list" not in item:
@@ -321,6 +326,7 @@ class DownloadSource:
                         if len(dd) >= size:
                             yield dd
                             dd = []
+                    break
             except (IOError, json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Failed to process {file_path}: {e}")
                 continue
