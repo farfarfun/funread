@@ -332,6 +332,8 @@ class DownloadSource:
                             )
                         if "customOrder" in data:
                             source["customOrder"] = data["customOrder"]
+                        else:
+                            source["customOrder"] = 999999999
                         dd.append(source)
                         if len(dd) >= size:
                             yield dd
