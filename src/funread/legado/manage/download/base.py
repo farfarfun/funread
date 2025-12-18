@@ -330,7 +330,8 @@ class DownloadSource:
                             source["sourceUrl"] = (
                                 f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
                             )
-
+                        if "customOrder" in data:
+                            source["customOrder"] = data["customOrder"]
                         dd.append(source)
                         if len(dd) >= size:
                             yield dd
