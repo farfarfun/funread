@@ -99,7 +99,7 @@ class RSSSourceDownload(DownloadSource):
         cache_path = f"{self.path_rot}/../cache"
         logger.info(f"cache_path:{cache_path}")
 
-        @disk_cache(cache_key="url", cache_dir=cache_path, expire=3600 * 24)
+        @disk_cache(cache_key="url", cache_dir=cache_path, expire=3600 * 24 * 7)
         def load_data(url: str) -> dict:
             try:
                 return requests.get(url, headers=faker.generate()).json()
