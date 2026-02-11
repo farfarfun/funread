@@ -3,9 +3,9 @@ from datetime import datetime
 from dominate.tags import *
 from fundrive.fungit import GithubDrive
 from funfile import funos
+from funlog import getLogger
 from funsecret import read_secret
 from funtask import Task
-from funutil import getLogger
 
 from funread.legado.manage.download.rss import RSSSourceDownload
 

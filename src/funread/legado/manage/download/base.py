@@ -10,8 +10,8 @@ import pandas as pd
 import requests
 from funfile import funos, pickle
 from funfile.compress import tarfile
+from funlog import getLogger
 from funsecret import get_md5_str
-from funutil import getLogger
 from tqdm import tqdm
 
 from funread.legado.manage.utils import url_to_hostname
