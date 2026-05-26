@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from fundrive import GithubDrive
 from funfake.headers import Headers
-from funlog import getLogger
-from funtask import Task
+from nltlog import getLogger
+from nlttask import Task
 
 logger = getLogger("funread")
 

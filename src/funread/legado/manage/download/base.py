@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 import requests
 from funfile import funos, pickle
 from funfile.compress import tarfile
-from funlog import getLogger
+from nltlog import getLogger
 from funsecret import get_md5_str
 from tqdm import tqdm
 

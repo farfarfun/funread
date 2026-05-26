@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Optional
 from dominate.tags import *
 from fundrive.fungit import GithubDrive
 from funfile import funos
-from funlog import getLogger
+from nltlog import getLogger
 from funsecret import read_secret
-from funtask import Task
+from nlttask import Task
 
 from funread.legado.manage.download.rss import RSSSourceDownload
 

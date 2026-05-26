@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import requests
 from funfake.headers import Headers
-from funlog import getLogger
+from nltlog import getLogger
 from funutil.cache import disk_cache
 from tqdm import tqdm
 
