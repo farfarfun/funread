@@ -4,9 +4,9 @@ import json
 import os
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-import pandas as pd
 import requests
 from funfile import funos, pickle
 from funfile.compress import tarfile
@@ -18,6 +18,12 @@ from funread.legado.manage.utils import url_to_hostname
 
 logger = getLogger("funread")
 
+# 常量定义
+DEFAULT_BACKUP_HOST = "https://farfarfun.github.com"
+DEFAULT_BACKUP_ID = 100000
+REQUEST_TIMEOUT = 30
+MAX_PICKLE_SIZE = 1024 * 1024 * 100  # 100MB max pickle file size
+
 
 class DownloadSource:
     """
@@ -27,7 +33,7 @@ class DownloadSource:
     - 源的添加和管理
     - MD5 去重
     - URL 索引管理
-    - 数据持久化（pickle）
+    - 数据持久化（JSON）
     - 数据备份和恢复（tar.xz）
     """
 
@@ -40,20 +46,60 @@ class DownloadSource:
             cate1: 分类名称（如 'book' 或 'rss'）
         """
         self.cate1 = cate1
-        self.path_rot = f"{path}/{cate1}"
-        self.path_bak = f"{path}/{cate1}/bak"
-        self.path_pkl = f"{path}/{cate1}/pkl"
-        self.path_bok = f"{path}/{cate1}/source"
-        self.pkl_url = f"{self.path_pkl}/url_info.pkl.bz2"
-        self.pkl_md5 = f"{self.path_pkl}/source_info.pkl.bz2"
+        # 使用Path进行安全的路径操作
+        base_path = Path(path) / cate1
+        self.path_rot = str(base_path)
+        self.path_bak = str(base_path / "bak")
+        self.path_pkl = str(base_path / "pkl")
+        self.path_bok = str(base_path / "source")
+        self.pkl_url = str(Path(self.path_pkl) / "url_info.json")
+        self.pkl_md5 = str(Path(self.path_pkl) / "source_info.json")
 
         self.url_map: Dict[str, int] = {}
         self.md5_set: Dict[str, Dict[str, Any]] = {}
         self.current_id = 1
 
-        funos.makedirs(self.path_bak)
-        funos.makedirs(self.path_bok)
-        funos.makedirs(self.path_pkl)
+        # 创建必要目录
+        self._ensure_directories()
+
+    def _ensure_directories(self) -> None:
+        """确保所有必要的目录存在"""
+        for path in [self.path_bak, self.path_bok, self.path_pkl]:
+            funos.makedirs(path)
+
+    @staticmethod
+    def _validate_path(path: str, base_path: str) -> bool:
+        """验证路径安全性，防止路径遍历攻击"""
+        try:
+            real_path = Path(path).resolve()
+            real_base = Path(base_path).resolve()
+            return str(real_path).startswith(str(real_base))
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _load_json_safely(file_path: str) -> Dict[str, Any]:
+        """安全加载JSON文件"""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in {file_path}: {e}")
+            raise
+        except IOError as e:
+            logger.error(f"Failed to read {file_path}: {e}")
+            raise
+
+    @staticmethod
+    def _save_json_safely(file_path: str, data: Dict[str, Any]) -> None:
+        """安全保存JSON文件"""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, sort_keys=True, indent=2, ensure_ascii=False)
+        except IOError as e:
+            logger.error(f"Failed to write {file_path}: {e}")
+            raise
 
     def loader(self) -> None:
         """
@@ -89,12 +135,10 @@ class DownloadSource:
         Returns:
             URL 对应的索引 ID
         """
-        if url in self.url_map:
-            return self.url_map[url]
-        else:
+        if url not in self.url_map:
             self.current_id += 1
             self.url_map[url] = self.current_id
-            return self.current_id
+        return self.url_map[url]
 
     @staticmethod
     def add_source_to_candidate(
@@ -117,54 +161,46 @@ class DownloadSource:
         # 读取或创建数据文件
         if os.path.exists(fpath):
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                logger.error(f"Failed to read {fpath}: {e}")
-                data = {
-                    "available": True,
-                    "merged": [],
-                    "candidate": [],
-                    "url_id": url_info.get("url_id", 0),
-                    "hostname": url_info.get("hostname", ""),
-                }
+                data = DownloadSource._load_json_safely(fpath)
+            except (json.JSONDecodeError, IOError):
+                data = DownloadSource._create_default_data(url_info)
         else:
-            data = {
-                "available": True,
-                "merged": [],
-                "candidate": [],
-                "url_id": url_info.get("url_id", 0),
-                "hostname": url_info.get("hostname", ""),
-            }
+            data = DownloadSource._create_default_data(url_info)
 
-        # 订阅源是否是最终版本
-        data["final"] = False if "final" not in data else data["final"]
-
-        # 是最终版本，直接返回
-        if data["final"] or not data["available"]:
+        # 检查是否已是最终版本或不可用
+        if data.get("final", False) or not data.get("available", True):
             return
+
         # 收集所有已存在的 MD5 值
-        md5_list: List[str] = []
+        existing_md5s = DownloadSource._collect_existing_md5s(data)
+
+        # 如果 MD5 不存在，添加到候选列表
+        if md5 not in existing_md5s:
+            data["candidate"].append({"md5_list": [md5], "source": source})
+            DownloadSource._save_json_safely(fpath, data)
+
+    @staticmethod
+    def _create_default_data(url_info: Dict[str, Any]) -> Dict[str, Any]:
+        """创建默认的数据结构"""
+        return {
+            "available": True,
+            "merged": [],
+            "candidate": [],
+            "final": False,
+            "url_id": url_info.get("url_id", 0),
+            "hostname": url_info.get("hostname", ""),
+        }
+
+    @staticmethod
+    def _collect_existing_md5s(data: Dict[str, Any]) -> List[str]:
+        """从数据中收集所有已存在的 MD5 值"""
+        md5_list = []
         for key in ("merged", "candidate"):
             if key in data:
                 for item in data[key]:
                     if "md5_list" in item:
                         md5_list.extend(item["md5_list"])
-
-        # 如果  MD5 不存在，添加到候选列表
-        if md5 not in md5_list:
-            data["candidate"].append({"md5_list": [md5], "source": source})
-
-            # 确保目录存在
-            os.makedirs(os.path.dirname(fpath), exist_ok=True)
-
-            # 写入文件
-            try:
-                with open(fpath, "w", encoding="utf-8") as fw:
-                    json.dump(data, fw, sort_keys=True, indent=4, ensure_ascii=False)
-            except IOError as e:
-                logger.error(f"Failed to write {fpath}: {e}")
-                raise
+        return md5_list
 
     def add_source(self, source: Dict[str, Any], *args, **kwargs) -> bool:
         """
@@ -230,7 +266,7 @@ class DownloadSource:
         Args:
             data: 源数据，可以是：
                 - URL 字符串（以 http:// 或 https:// 开头）
-                - 文件路径（pickle 或 JSON 文件）
+                - 文件路径（JSON 文件）
                 - JSON 字符串
                 - 源字典列表
                 - 单个源字典
@@ -239,50 +275,78 @@ class DownloadSource:
             成功添加的源数量
         """
         # 解析输入数据
-        if isinstance(data, str):
-            if data.startswith(("http://", "https://")):
-                try:
-                    response = requests.get(data, timeout=30)
-                    response.raise_for_status()
-                    data = response.json()
-                except (requests.RequestException, json.JSONDecodeError) as e:
-                    logger.error(f"Failed to fetch or parse URL {data}: {e}")
-                    return 0
-            elif os.path.exists(data):
-                try:
-                    if data.endswith(".pkl") or data.endswith(".pkl.bz2"):
-                        data = pickle.load(data)
-                    else:
-                        with open(data, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                except (IOError, json.JSONDecodeError, Exception) as e:
-                    logger.error(f"Failed to load file {data}: {e}")
-                    return 0
-            elif data.strip().startswith(("[", "{")):
-                try:
-                    data = json.loads(data)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON string: {e}")
-                    return 0
-            else:
-                logger.error(f"Invalid data format: {data[:100]}")
-                return 0
+        parsed_data = self._parse_input_data(data)
+        if parsed_data is None:
+            return 0
 
         # 确保 data 是列表
-        if isinstance(data, dict):
-            data = [data]
-        elif not isinstance(data, list):
-            logger.error(f"Unsupported data type: {type(data)}")
+        if isinstance(parsed_data, dict):
+            parsed_data = [parsed_data]
+        elif not isinstance(parsed_data, list):
+            logger.error(f"Unsupported data type: {type(parsed_data)}")
             return 0
 
         # 批量添加
-        success_count = 0
-        for source in data:
-            if self.add_source(source, *args, **kwargs):
-                success_count += 1
+        success_count = sum(1 for source in parsed_data if self.add_source(source, *args, **kwargs))
 
-        logger.info(f"Successfully added {success_count}/{len(data)} sources")
+        logger.info(f"Successfully added {success_count}/{len(parsed_data)} sources")
         return success_count
+
+    def _parse_input_data(self, data: Union[str, Dict, List]) -> Optional[Union[Dict, List]]:
+        """解析输入数据，返回结构化数据或None"""
+        if isinstance(data, str):
+            return self._parse_string_data(data)
+        elif isinstance(data, (dict, list)):
+            return data
+        else:
+            logger.error(f"Invalid data type: {type(data)}")
+            return None
+
+    def _parse_string_data(self, data: str) -> Optional[Union[Dict, List]]:
+        """解析字符串类型的数据"""
+        # 尝试作为URL
+        if data.startswith(("http://", "https://")):
+            return self._fetch_from_url(data)
+
+        # 尝试作为文件路径
+        if os.path.exists(data):
+            return self._load_from_file(data)
+
+        # 尝试作为JSON字符串
+        if data.strip().startswith(("[", "{")):
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON string: {e}")
+                return None
+
+        logger.error(f"Invalid data format: {data[:100]}")
+        return None
+
+    def _fetch_from_url(self, url: str) -> Optional[Union[Dict, List]]:
+        """从URL获取数据"""
+        try:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch URL {url}: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from URL {url}: {e}")
+            return None
+
+    def _load_from_file(self, file_path: str) -> Optional[Union[Dict, List]]:
+        """从文件加载数据"""
+        try:
+            if file_path.endswith(".pkl") or file_path.endswith(".pkl.bz2"):
+                logger.warning("Pickle format is deprecated, use JSON instead")
+                return pickle.load(file_path)
+            else:
+                return self._load_json_safely(file_path)
+        except (IOError, Exception) as e:
+            logger.error(f"Failed to load file {file_path}: {e}")
+            return None
 
     def export_sources(self, size: int = 1000) -> Iterator[List[Dict[str, Any]]]:
         """
@@ -356,54 +420,52 @@ class DownloadSource:
         # 加载 URL 映射
         if os.path.exists(self.pkl_url):
             try:
-                df = pd.read_pickle(self.pkl_url, compression="infer")
-                if "url" in df.columns and "url_id" in df.columns:
-                    self.url_map = {row["url"]: row["url_id"] for _, row in df.iterrows()}
+                data = self._load_json_safely(self.pkl_url)
+                if isinstance(data, list):
+                    self.url_map = {item["url"]: item["url_id"] for item in data}
                 else:
-                    # 兼容旧格式
-                    self.url_map = {k: v for k, v in df.values}
-            except Exception as e:
-                logger.warning(f"Failed to load URL map: {e}, using default")
-                self.url_map = {"https://farfarfun.github.com": 100000}
+                    self.url_map = data
+            except (IOError, json.JSONDecodeError):
+                logger.warning("Failed to load URL map, using default")
+                self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
         else:
-            self.url_map = {"https://farfarfun.github.com": 100000}
+            self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
 
         # 更新当前 ID
-        if self.url_map:
-            self.current_id = max(self.url_map.values())
-        else:
-            self.current_id = 1
+        self.current_id = max(self.url_map.values()) if self.url_map else 1
 
         # 加载 MD5 索引
         if os.path.exists(self.pkl_md5):
             try:
-                df = pd.read_pickle(self.pkl_md5, compression="infer")
-                self.md5_set = {info["md5"]: info for info in df.to_dict(orient="records")}
-            except Exception as e:
-                logger.warning(f"Failed to load MD5 index: {e}, starting fresh")
+                data = self._load_json_safely(self.pkl_md5)
+                if isinstance(data, list):
+                    self.md5_set = {item["md5"]: item for item in data}
+                else:
+                    self.md5_set = data
+            except (IOError, json.JSONDecodeError):
+                logger.warning("Failed to load MD5 index, starting fresh")
                 self.md5_set = {}
         else:
             self.md5_set = {}
 
     def dumps(self) -> None:
         """
-        保存数据到持久化存储（pickle 格式）
+        保存数据到持久化存储（JSON 格式）
         """
         logger.info("Saving data to persistent storage")
-        funos.makedirs(self.path_pkl)
-        funos.makedirs(self.path_bok)
+        self._ensure_directories()
 
         try:
             # 保存 URL 映射
             if self.url_map:
-                df = pd.DataFrame([{"url": k, "url_id": v} for k, v in self.url_map.items()])
-                df.to_pickle(self.pkl_url, compression="infer")
+                url_data = [{"url": k, "url_id": v} for k, v in self.url_map.items()]
+                self._save_json_safely(self.pkl_url, {"data": url_data})
 
             # 保存 MD5 索引
             if self.md5_set:
-                df = pd.DataFrame(list(self.md5_set.values()))
-                df.to_pickle(self.pkl_md5, compression="infer")
-        except Exception as e:
+                md5_data = list(self.md5_set.values())
+                self._save_json_safely(self.pkl_md5, {"data": md5_data})
+        except IOError as e:
             logger.error(f"Failed to save data: {e}")
             raise
 

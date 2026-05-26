@@ -1,40 +1,77 @@
 """RSS 更新任务模块"""
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from fundrive import GithubDrive
 from funfake.headers import Headers
+from funlog import getLogger
 from funtask import Task
 
-faker = Headers()
+logger = getLogger("funread")
+
+# 常量定义
+DEFAULT_ICON_URL = "https://via.placeholder.com/150"
+CAT_API_URL = "https://api.thecatapi.com/v1/images/search?size=full"
+DEFAULT_TIMEOUT = 10
+REQUEST_RETRIES = 2
+DEFAULT_REPO = "farfarfun/funread-cache"
+
+# 外部书源列表
+EXTERNAL_SOURCES = [
+    {"title": "源仓库(新)", "url": "https://link3.cc/yckceo"},
+    {"title": "开源阅读-语雀文档", "url": "https://www.yuque.com/legado"},
+    {"title": "喵公子书源", "url": "http://yuedu.miaogongzi.net/gx.html"},
+    {"title": "「阅读」APP 源-aoaostar", "url": "https://legado.aoaostar.com/"},
+    {"title": "yiove", "url": "https://shuyuan.yiove.com/"},
+]
 
 
 class UpdateRssTask(Task):
     """RSS 更新任务，用于更新订阅源列表"""
 
-    def __init__(self) -> None:
-        """初始化 RSS 更新任务"""
+    def __init__(self, repo: str = DEFAULT_REPO) -> None:
+        """
+        初始化 RSS 更新任务
+
+        Args:
+            repo: GitHub 仓库地址
+        """
         self.drive = GithubDrive()
-        self.drive.login("farfarfun/funread-cache")
+        self.drive.login(repo)
+        self.repo = repo
+        self.faker = Headers()
         super(UpdateRssTask, self).__init__()
 
-    def random_icon(self) -> str:
+    def random_icon(self, retries: int = REQUEST_RETRIES) -> str:
         """
         获取随机图标 URL
+
+        Args:
+            retries: 重试次数
 
         Returns:
             图标 URL 字符串
         """
-        url = "https://api.thecatapi.com/v1/images/search?size=full"
-        try:
-            response = requests.get(url, headers=faker.generate(), timeout=10)
-            response.raise_for_status()
-            return response.json()[0]["url"]
-        except (requests.RequestException, KeyError, IndexError) as e:
-            # 返回默认图标
-            return "https://via.placeholder.com/150"
+        for attempt in range(retries):
+            try:
+                response = requests.get(
+                    CAT_API_URL,
+                    headers=self.faker.generate(),
+                    timeout=DEFAULT_TIMEOUT,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if data and len(data) > 0 and "url" in data[0]:
+                    return data[0]["url"]
+            except (requests.RequestException, (KeyError, IndexError, ValueError)) as e:
+                if attempt < retries - 1:
+                    logger.debug(f"Icon fetch attempt {attempt + 1} failed: {e}, retrying...")
+                    continue
+                logger.warning(f"Failed to fetch icon after {retries} attempts: {e}")
+
+        return DEFAULT_ICON_URL
 
     def update_book(self, dir_path: str = "funread/legado/snapshot/lasted") -> None:
         """
@@ -43,53 +80,75 @@ class UpdateRssTask(Task):
         Args:
             dir_path: 目录路径
         """
-        dl: List[Dict[str, Any]] = []
-        for dir_info in self.drive.get_dir_list(dir_path):
-            dl.append(
-                {
-                    "title": dir_info["name"],
-                    "pic": self.random_icon(),
-                    "url": f"https://farfarfun.github.io/funread-cache/{dir_info['path']}/index.html",
-                    "description": "this is content",
-                }
-            )
+        try:
+            sources = self._build_book_sources(dir_path)
+            sources.extend(self._enrich_external_sources(EXTERNAL_SOURCES))
 
-        dl.append(
-            {
-                "title": "源仓库(新)",
-                "url": "https://link3.cc/yckceo",
+            data = {
+                "name": "funread",
+                "next": f"https://gitee.com/{self.repo}/raw/master/{dir_path}/funread.json",
+                "list": sources,
             }
-        )
+            self.drive.upload_file(git_path=f"{dir_path}/source.json", content=data)
+            logger.info(f"Successfully updated book sources: {len(sources)} sources")
+        except Exception as e:
+            logger.error(f"Failed to update book sources: {e}")
+            raise
 
-        dl.append({"title": "开源阅读-语雀文档", "url": "https://www.yuque.com/legado"})
-        dl.append({"title": "喵公子书源", "url": "http://yuedu.miaogongzi.net/gx.html"})
-        dl.append({"title": "「阅读」APP 源-aoaostar", "url": "https://legado.aoaostar.com/"})
-        dl.append({"title": "yiove", "url": "https://shuyuan.yiove.com/"})
+    def _build_book_sources(self, dir_path: str) -> List[Dict[str, Any]]:
+        """构建书源列表"""
+        sources = []
+        try:
+            for dir_info in self.drive.get_dir_list(dir_path):
+                sources.append(
+                    {
+                        "title": dir_info["name"],
+                        "pic": self.random_icon(),
+                        "url": f"https://farfarfun.github.io/{self.repo}/{dir_info['path']}/index.html",
+                        "description": dir_info.get("description", "Legado source"),
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+        except Exception as e:
+            logger.error(f"Failed to build book sources: {e}")
 
-        #
-        for line in dl:
-            if "pic" not in line:
-                line["pic"] = self.random_icon()
-            if "time" not in line:
-                line["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return sources
 
-        data1 = {
-            "name": "test",
-            "next": "https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/funread.json",
-            "list": dl,
-        }
-        self.drive.upload_file(git_path=f"{dir_path}/source.json", content=data1)
+    def _enrich_external_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """为外部源添加元数据"""
+        for source in sources:
+            if "pic" not in source:
+                source["pic"] = self.random_icon()
+            if "time" not in source:
+                source["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        return sources
 
     def update_main(self) -> None:
         """
         更新主 RSS 源配置
         """
-        rss = {
-            "源": "https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/source.json",
-            "源(备)": "https://github.com/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/source.json",
+        try:
+            rss_urls = self._build_rss_urls()
+            data = self._build_main_rss_config(rss_urls)
+            self.drive.upload_file(
+                git_path="funread/legado/snapshot/lasted/funread.json", content=data
+            )
+            logger.info("Successfully updated main RSS configuration")
+        except Exception as e:
+            logger.error(f"Failed to update main RSS: {e}")
+            raise
+
+    def _build_rss_urls(self) -> Dict[str, str]:
+        """构建 RSS URL 映射"""
+        return {
+            "源": f"https://gitee.com/{self.repo}/raw/master/funread/legado/snapshot/lasted/source.json",
+            "源(备)": f"https://github.com/{self.repo}/raw/master/funread/legado/snapshot/lasted/source.json",
         }
 
-        data2: List[Dict[str, Any]] = [
+    def _build_main_rss_config(self, rss_urls: Dict[str, str]) -> List[Dict[str, Any]]:
+        """构建主 RSS 配置"""
+        return [
             {
                 "lastUpdateTime": int(datetime.now().timestamp()),
                 "sourceName": "funread",
@@ -97,7 +156,7 @@ class UpdateRssTask(Task):
                 "sourceUrl": "https://github.com/farfarfun",
                 "loadWithBaseUrl": False,
                 "singleUrl": False,
-                "sortUrl": "\n".join([f"{k}::{v}" for k, v in rss.items()]),
+                "sortUrl": "\n".join([f"{k}::{v}" for k, v in rss_urls.items()]),
                 "ruleArticles": "$.list[*]",
                 "ruleNextArticles": "$.next",
                 "ruleTitle": "$.title",
@@ -109,13 +168,16 @@ class UpdateRssTask(Task):
                 "enabled": True,
             }
         ]
-        self.drive.upload_file(
-            git_path="funread/legado/snapshot/lasted/funread.json", content=data2
-        )
 
     def run(self) -> None:
         """
         执行更新任务
         """
-        self.update_book()
-        self.update_main()
+        logger.info("Starting RSS update task")
+        try:
+            self.update_book()
+            self.update_main()
+            logger.info("RSS update task completed successfully")
+        except Exception as e:
+            logger.error(f"RSS update task failed: {e}")
+            raise
