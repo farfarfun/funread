@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from dominate.tags import *
 from fundrive.fungit import GithubDrive
-from funfile import funos
+from nltfile import funos
 from nltlog import getLogger
 from funsecret import read_secret
 from nlttask import Task
