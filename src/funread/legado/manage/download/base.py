@@ -603,7 +603,7 @@ class DownloadSource:
                     tar.add(self.path_bok, arcname=os.path.basename(self.path_bok))
             logger.info(f"Backup created successfully: {zip_file}")
             return zip_file
-        except (tarfile.TarError, IOError) as e:
+        except Exception as e:
             logger.error(f"Failed to create backup: {e}")
             raise
 
