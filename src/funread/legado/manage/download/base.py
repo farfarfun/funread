@@ -101,6 +101,13 @@ class DownloadSource:
             logger.error(f"Failed to write {file_path}: {e}")
             raise
 
+    @staticmethod
+    def _extract_persisted_items(data: Any) -> Any:
+        """兼容历史与当前持久化格式，提取真实数据载荷"""
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        return data
+
     def loader(self) -> None:
         """
         加载源数据，需要在子类中实现
@@ -135,6 +142,8 @@ class DownloadSource:
         Returns:
             URL 对应的索引 ID
         """
+        if not isinstance(self.current_id, int):
+            raise TypeError(f"current_id must be int, got {type(self.current_id).__name__}")
         if url not in self.url_map:
             self.current_id += 1
             self.url_map[url] = self.current_id
@@ -418,13 +427,18 @@ class DownloadSource:
         # 加载 URL 映射
         if os.path.exists(self.pkl_url):
             try:
-                data = self._load_json_safely(self.pkl_url)
+                data = self._extract_persisted_items(self._load_json_safely(self.pkl_url))
                 if isinstance(data, list):
                     self.url_map = {item["url"]: item["url_id"] for item in data}
-                else:
+                elif isinstance(data, dict):
                     self.url_map = data
+                else:
+                    raise ValueError(f"Unsupported URL map data type: {type(data).__name__}")
             except (IOError, json.JSONDecodeError):
                 logger.warning("Failed to load URL map, using default")
+                self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f"Invalid URL map data, using default: {e}")
                 self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
         else:
             self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
@@ -435,13 +449,18 @@ class DownloadSource:
         # 加载 MD5 索引
         if os.path.exists(self.pkl_md5):
             try:
-                data = self._load_json_safely(self.pkl_md5)
+                data = self._extract_persisted_items(self._load_json_safely(self.pkl_md5))
                 if isinstance(data, list):
                     self.md5_set = {item["md5"]: item for item in data}
-                else:
+                elif isinstance(data, dict):
                     self.md5_set = data
+                else:
+                    raise ValueError(f"Unsupported MD5 index data type: {type(data).__name__}")
             except (IOError, json.JSONDecodeError):
                 logger.warning("Failed to load MD5 index, starting fresh")
+                self.md5_set = {}
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f"Invalid MD5 index data, starting fresh: {e}")
                 self.md5_set = {}
         else:
             self.md5_set = {}
