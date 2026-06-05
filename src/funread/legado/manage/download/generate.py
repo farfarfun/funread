@@ -151,7 +151,9 @@ class GenerateSourceType:
         self.source_type = source_type
         self.drive = GithubDrive()
         self.drive.login(
-            repo_owner=self.repo_str.split("/")[0], repo_name=self.repo_str.split("/")[1]
+            repo_owner=self.repo_str.split("/")[0],
+            repo_name=self.repo_str.split("/")[1],
+            branch="master",
         )
 
     def set_table_head(self) -> None:
