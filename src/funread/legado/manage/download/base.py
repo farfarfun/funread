@@ -108,6 +108,60 @@ class DownloadSource:
             return data["data"]
         return data
 
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        """将持久化值尽量转换为 int，不可转换时返回 None"""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return DownloadSource._coerce_int(value[0])
+        return None
+
+    @classmethod
+    def _normalize_url_map(cls, data: Any) -> Dict[str, int]:
+        """规范化 URL 映射，兼容历史格式并过滤脏数据"""
+        normalized: Dict[str, int] = {}
+
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict) and isinstance(data.get("url"), list):
+            url_ids = data.get("url_id", [])
+            if not isinstance(url_ids, list):
+                raise ValueError("Invalid URL map data: url_id must be a list")
+            items = [{"url": url, "url_id": url_id} for url, url_id in zip(data["url"], url_ids)]
+        elif isinstance(data, dict):
+            items = [{"url": url, "url_id": url_id} for url, url_id in data.items()]
+        else:
+            raise ValueError(f"Unsupported URL map data type: {type(data).__name__}")
+
+        for item in items:
+            if not isinstance(item, dict):
+                logger.warning(f"Skipping invalid URL map item: {item!r}")
+                continue
+            url = item.get("url")
+            url_id = cls._coerce_int(item.get("url_id"))
+            if not isinstance(url, str) or not url:
+                logger.warning(f"Skipping URL map item with invalid url: {item!r}")
+                continue
+            if url_id is None:
+                logger.warning(f"Skipping URL map item with invalid url_id: {item!r}")
+                continue
+            normalized[url] = url_id
+
+        return normalized
+
     def loader(self) -> None:
         """
         加载源数据，需要在子类中实现
@@ -428,12 +482,7 @@ class DownloadSource:
         if os.path.exists(self.pkl_url):
             try:
                 data = self._extract_persisted_items(self._load_json_safely(self.pkl_url))
-                if isinstance(data, list):
-                    self.url_map = {item["url"]: item["url_id"] for item in data}
-                elif isinstance(data, dict):
-                    self.url_map = data
-                else:
-                    raise ValueError(f"Unsupported URL map data type: {type(data).__name__}")
+                self.url_map = self._normalize_url_map(data)
             except (IOError, json.JSONDecodeError):
                 logger.warning("Failed to load URL map, using default")
                 self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
