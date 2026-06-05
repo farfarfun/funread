@@ -571,7 +571,7 @@ class DownloadSource:
             with tarfile.open(zip_file, "r:*") as tar:
                 tar.extractall(self.path_rot)
             self.loads()
-        except (tarfile.TarError, IOError) as e:
+        except Exception as e:
             logger.error(f"Failed to extract backup: {e}")
             raise
 
