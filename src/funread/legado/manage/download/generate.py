@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from dominate.tags import *
-from fundrive.fungit import GithubDrive
+from fundrive.drives.github import GithubDrive
 from nltfile import funos
 from nltlog import getLogger
 from funsecret import read_secret
