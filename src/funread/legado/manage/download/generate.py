@@ -259,7 +259,10 @@ class GenerateSourceType:
         try:
             git_path = f"{self.dir_path}/progress-{counter}.json"
             self.drive.upload_file(
-                content=data, fid=self.dir_path, filepath=None, filename=f"progress-{counter}.json"
+                content=json.dumps(data),
+                fid=self.dir_path,
+                filepath=None,
+                filename=f"progress-{counter}.json",
             )
             logger.info(f"Uploaded {len(data)} sources to {git_path}")
         except Exception as e:
