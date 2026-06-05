@@ -258,7 +258,7 @@ class GenerateSourceType:
         """上传数据批次"""
         try:
             git_path = f"{self.dir_path}/progress-{counter}.json"
-            self.drive.upload_file(content=data, git_path=git_path)
+            self.drive.upload_file(content=data, fid=git_path, filepath=None)
             logger.info(f"Uploaded {len(data)} sources to {git_path}")
         except Exception as e:
             logger.error(f"Failed to upload batch {counter}: {e}")
