@@ -288,8 +288,6 @@ class DownloadSource:
 
         # 批量添加
         success_count = sum(1 for source in parsed_data if self.add_source(source, *args, **kwargs))
-
-        logger.info(f"Successfully added {success_count}/{len(parsed_data)} sources")
         return success_count
 
     def _parse_input_data(self, data: Union[str, Dict, List]) -> Optional[Union[Dict, List]]:
