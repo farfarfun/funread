@@ -275,7 +275,9 @@ class GenerateSourceType:
         """更新 RSS 配置"""
         try:
             html_content = self.generate_html_report()
-            self.drive.upload_file(git_path=f"{self.dir_path}/index.html", content=html_content)
+            self.drive.upload_file(
+                filepath=None, fid=f"{self.dir_path}", filename="index.html", content=html_content
+            )
             logger.info("RSS configuration updated successfully")
         except Exception as e:
             logger.error(f"Failed to update RSS: {e}")
