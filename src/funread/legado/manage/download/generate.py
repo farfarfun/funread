@@ -15,6 +15,8 @@ from funread.legado.manage.download.rss import RSSSourceDownload
 logger = getLogger("funread")
 
 # 常量定义
+default_repo_owner = "farfarfun"
+default_repo_name = "funread-cache"
 DEFAULT_REPO = "farfarfun/funread-cache"
 DEFAULT_DIR_PATH = "funread/legado/snapshot/lasted"
 EXPORT_BATCH_SIZE = 500
@@ -148,7 +150,9 @@ class GenerateSourceType:
         self.dir_path = dir_path
         self.source_type = source_type
         self.drive = GithubDrive()
-        self.drive.login(repo_str=self.repo_str)
+        self.drive.login(
+            repo_owner=self.repo_str.split("/")[0], repo_name=self.repo_str.split("/")[1]
+        )
 
     def set_table_head(self) -> None:
         """设置表格头"""
