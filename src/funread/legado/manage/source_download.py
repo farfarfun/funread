@@ -145,7 +145,7 @@ def iter_source_list_data(
     source_type: Optional[str] = None,
     min_source_count: Optional[int] = None,
     max_source_count: Optional[int] = None,
-    stale_seconds: int = 3600,
+    stale_seconds: int = 86400,
     limit: Optional[int] = None,
     timeout: int = 30,
     database_url: Optional[str] = None,
