@@ -102,6 +102,3 @@ class UpdateEntrance:
     def run(self):
         self.update_book()
         self.update_main()
-
-
-UpdateEntrance().run()
