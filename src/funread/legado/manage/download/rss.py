@@ -79,5 +79,5 @@ class RSSSourceDownload(DownloadSource):
 
     def loader(self) -> None:
         """从 URL 记录迭代器中加载 RSS 源数据"""
-        for _, data in iter_source_list_data(source_type=self.cate1):
+        for _, data in iter_source_list_data(source_type=self.cate1, stale_time=30):
             self.add_sources(data)
