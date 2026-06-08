@@ -96,13 +96,18 @@ def test_iter_source_download_data_orders_by_last_queried_at_desc(tmp_path, monk
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    data = list(iter_source_download_data(source_type="rss", database_url=db_url))
+    items = list(iter_source_download_data(source_type="rss", database_url=db_url))
 
     assert calls == [
         "https://example.com/newer.json",
         "https://example.com/older.json",
     ]
-    assert data == [[{"id": 1}, {"id": 2}], {"list": [{"id": 3}]}]
+    assert [item[1] for item in items] == [[{"id": 1}, {"id": 2}], {"list": [{"id": 3}]}]
+    assert [item[0].download_url for item in items] == [
+        "https://example.com/newer.json",
+        "https://example.com/older.json",
+    ]
+    assert [item[0].source_count for item in items] == [2, 1]
 
     engine = create_engine(db_url, future=True)
     with Session(engine) as session:

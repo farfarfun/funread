@@ -1,7 +1,7 @@
 """Source download record persistence."""
 
 from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from nltlog import getLogger
@@ -130,8 +130,8 @@ def iter_source_download_data(
     limit: Optional[int] = None,
     timeout: int = 30,
     database_url: Optional[str] = None,
-) -> Iterator[Any]:
-    """Yield source payloads for matching URLs ordered by last query time descending."""
+) -> Iterator[Tuple[SourceDownloadRecord, Any]]:
+    """Yield updated record info and source payloads ordered by last query time descending."""
     init_source_download_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
 
@@ -152,14 +152,14 @@ def iter_source_download_data(
             response.raise_for_status()
             source_data = response.json()
             source_count = _count_source_items(source_data)
-            upsert_source_download_record(
+            updated_record = upsert_source_download_record(
                 download_url=record.download_url,
                 source_type=record.source_type,
                 source_count=source_count,
                 queried_at=queried_at,
                 database_url=database_url,
             )
-            yield source_data
+            yield updated_record, source_data
         except Exception as e:
             logger.warning(f"Failed to fetch source data from {record.download_url}: {e}")
             upsert_source_download_record(
