@@ -140,7 +140,7 @@ class BookSourceDownload(DownloadSource):
 
     def loader(self) -> None:
         """从 URL 记录迭代器中加载书源数据"""
-        for _, data in iter_source_list_data(source_type=self.cate1, stale_time=30):
+        for _, data in iter_source_list_data(source_type=self.cate1):
             self.add_sources(data)
 
     def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
