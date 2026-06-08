@@ -190,6 +190,21 @@ class DownloadSource:
         """返回当前源类型使用的 URL 字段名"""
         return "sourceUrl"
 
+    def persist_download_record(self, url: str, source_data: Any) -> None:
+        """将下载 URL 与源数据写入数据库，数据库未配置时静默跳过"""
+        try:
+            from funread.legado.manage import upsert_source_download_record
+
+            upsert_source_download_record(
+                download_url=url,
+                source_type=self.cate1,
+                source_data=source_data,
+            )
+        except ValueError:
+            return
+        except Exception as e:
+            logger.warning(f"Failed to persist download record for {url}: {e}")
+
     def url_index(self, url: str) -> int:
         """
         获取或创建 URL 的索引 ID
@@ -395,11 +410,15 @@ class DownloadSource:
         try:
             response = requests.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            self.persist_download_record(url, data)
+            return data
         except requests.RequestException as e:
+            self.persist_download_record(url, {"error": str(e)})
             logger.error(f"Failed to fetch URL {url}: {e}")
             return None
         except json.JSONDecodeError as e:
+            self.persist_download_record(url, {"error": f"Invalid JSON: {e}"})
             logger.error(f"Failed to parse JSON from URL {url}: {e}")
             return None
 
