@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import requests
 from nltlog import getLogger
 from nltsecret import read_secret
-from sqlalchemy import DateTime, Integer, String, create_engine, desc, select
+from sqlalchemy import DateTime, Integer, String, create_engine, desc, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -38,9 +38,23 @@ class SourceDownloadRecord(Base):
     last_queried_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class SourceRecord(Base):
+    """Persisted source URL mapping metadata."""
+
+    __tablename__ = "source_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    url: Mapped[str] = mapped_column(String(1024), unique=True, index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 _ENGINE_CACHE: Dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: Dict[str, sessionmaker] = {}
 _INITIALIZED_DATABASES = set()
+SOURCE_RECORD_ID_START = 10_000_000
 
 
 def _get_database_url(database_url: Optional[str] = None) -> Optional[str]:
@@ -169,6 +183,71 @@ def iter_source_download_data(
                 queried_at=queried_at,
                 database_url=database_url,
             )
+
+
+def list_source_records(database_url: Optional[str] = None) -> List[SourceRecord]:
+    """List source records ordered by id."""
+    init_source_download_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        return session.execute(select(SourceRecord).order_by(SourceRecord.id)).scalars().all()
+
+
+def load_source_url_map(database_url: Optional[str] = None) -> Dict[str, int]:
+    """Load URL to id mapping from the source_records table."""
+    return {record.url: record.id for record in list_source_records(database_url=database_url)}
+
+
+def _next_source_record_id(session: Session) -> int:
+    current_max = session.execute(select(func.max(SourceRecord.id))).scalar_one_or_none()
+    if current_max is None:
+        return SOURCE_RECORD_ID_START
+    return max(int(current_max) + 1, SOURCE_RECORD_ID_START)
+
+
+def add_source_url(
+    url: str,
+    source_id: Optional[int] = None,
+    database_url: Optional[str] = None,
+) -> SourceRecord:
+    """Add or update a source URL record."""
+    return upsert_source_record(url=url, source_id=source_id, database_url=database_url)
+
+
+def upsert_source_record(
+    url: str,
+    source_id: Optional[int] = None,
+    database_url: Optional[str] = None,
+) -> SourceRecord:
+    if not url:
+        raise ValueError("url is required")
+
+    normalized_source_id = int(source_id) if source_id is not None else None
+
+    init_source_download_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        stmt = select(SourceRecord).where(SourceRecord.url == url)
+        record = session.execute(stmt).scalar_one_or_none()
+
+        if record is None:
+            record_id = (
+                normalized_source_id
+                if normalized_source_id is not None
+                else _next_source_record_id(session)
+            )
+            record = SourceRecord(id=record_id, url=url)
+            session.add(record)
+        else:
+            if normalized_source_id is not None and record.id != normalized_source_id:
+                record.id = normalized_source_id
+            record.url = url
+
+        session.commit()
+        session.refresh(record)
+        return record
 
 
 def add_source_download_url(

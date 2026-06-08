@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 from funread.legado.manage.source_download import (
     Base,
     SourceDownloadRecord,
+    SourceRecord,
     add_source_download_url,
+    add_source_url,
+    load_source_url_map,
+    list_source_records,
     iter_source_download_data,
     upsert_source_download_record,
 )
@@ -121,3 +125,55 @@ def test_iter_source_download_data_orders_by_last_queried_at_desc(tmp_path, monk
 
     assert rows[0].source_count == 2
     assert rows[1].source_count == 1
+
+
+def test_upsert_source_record(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'source_record.db'}"
+
+    record = add_source_url(
+        url="https://example.com/source-a",
+        source_id=1001,
+        database_url=db_url,
+    )
+
+    assert record.url == "https://example.com/source-a"
+    assert record.id == 1001
+
+    updated = add_source_url(
+        url="https://example.com/source-a-updated",
+        source_id=1001,
+        database_url=db_url,
+    )
+
+    engine = create_engine(db_url, future=True)
+    with Session(engine) as session:
+        rows = session.execute(select(SourceRecord)).scalars().all()
+
+    assert len(rows) == 1
+    assert updated.id == record.id
+    assert rows[0].url == "https://example.com/source-a-updated"
+    assert rows[0].id == 1001
+
+
+def test_add_source_url_assigns_ids_from_10000000(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'source_start.db'}"
+
+    first = add_source_url(
+        url="https://example.com/source-first",
+        database_url=db_url,
+    )
+    second = add_source_url(
+        url="https://example.com/source-second",
+        database_url=db_url,
+    )
+
+    assert first.id == 10000000
+    assert second.id == 10000001
+    assert load_source_url_map(database_url=db_url) == {
+        "https://example.com/source-first": 10000000,
+        "https://example.com/source-second": 10000001,
+    }
+    assert [record.id for record in list_source_records(database_url=db_url)] == [
+        10000000,
+        10000001,
+    ]

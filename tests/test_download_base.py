@@ -5,6 +5,7 @@ import funread.legado.manage.download.rss as rss_module
 
 from funread.legado.manage.download.base import DownloadSource
 from funread.legado.manage.download.book import BookSourceDownload
+from funread.legado.manage.source_download import add_source_url
 
 
 class DummyDownloadSource(DownloadSource):
@@ -15,31 +16,27 @@ class DummyDownloadSource(DownloadSource):
         return source
 
 
-def test_loads_normalizes_parallel_url_lists(tmp_path: Path) -> None:
-    source = DummyDownloadSource(path=str(tmp_path), cate1="rss")
-    Path(source.pkl_url).write_text(
-        '{"data":{"url":["https://a.example","https://b.example"],"url_id":[["7"],8]}}',
-        encoding="utf-8",
-    )
+def test_loads_reads_url_map_from_source_table(tmp_path: Path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'download_base.db'}"
+    add_source_url(url="https://a.example", source_id=10000007, database_url=db_url)
+    add_source_url(url="https://b.example", source_id=10000008, database_url=db_url)
+    source = DummyDownloadSource(path=str(tmp_path), cate1="rss", database_url=db_url)
 
     source.loads()
 
-    assert source.url_map == {"https://a.example": 7, "https://b.example": 8}
-    assert source.current_id == 8
+    assert source.url_map == {"https://a.example": 10000007, "https://b.example": 10000008}
+    assert source.current_id == 10000008
 
 
-def test_loads_skips_invalid_url_map_items(tmp_path: Path) -> None:
-    source = DummyDownloadSource(path=str(tmp_path), cate1="rss")
-    Path(source.pkl_url).write_text(
-        '{"data":[{"url":"https://a.example","url_id":[9]},{"url":"https://b.example","url_id":[]},{"url":"","url_id":11}]}',
-        encoding="utf-8",
-    )
+def test_url_index_writes_to_source_table(tmp_path: Path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'download_base_write.db'}"
+    source = DummyDownloadSource(path=str(tmp_path), cate1="rss", database_url=db_url)
 
     source.loads()
+    url_id = source.url_index("https://c.example")
 
-    assert source.url_map["https://a.example"] == 9
-    assert "https://b.example" not in source.url_map
-    assert source.current_id == max(source.url_map.values())
+    assert url_id == 10000000
+    assert source.url_map["https://c.example"] == 10000000
 
 
 def test_book_source_download_accepts_book_source_url(tmp_path: Path) -> None:

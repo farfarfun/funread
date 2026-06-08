@@ -20,7 +20,7 @@ logger = getLogger("funread")
 
 # 常量定义
 DEFAULT_BACKUP_HOST = "https://farfarfun.github.com"
-DEFAULT_BACKUP_ID = 100000
+DEFAULT_BACKUP_ID = 10000000
 REQUEST_TIMEOUT = 30
 MAX_PICKLE_SIZE = 1024 * 1024 * 100  # 100MB max pickle file size
 
@@ -53,6 +53,7 @@ class DownloadSource:
         self.path_pkl = str(base_path / "pkl")
         self.path_bok = str(base_path / "source")
         self.pkl_url = str(Path(self.path_pkl) / "url_info.json")
+        self.database_url = kwargs.get("database_url")
         self.pkl_md5 = str(Path(self.path_pkl) / "source_info.json")
 
         self.url_map: Dict[str, int] = {}
@@ -220,21 +221,16 @@ class DownloadSource:
             logger.warning(f"Failed to persist download record for {url}: {e}")
 
     def url_index(self, url: str) -> int:
-        """
-        获取或创建 URL 的索引 ID
+        """获取或创建 URL 的索引 ID。"""
+        if url in self.url_map:
+            return self.url_map[url]
 
-        Args:
-            url: URL 字符串
+        from funread.legado.manage import add_source_url
 
-        Returns:
-            URL 对应的索引 ID
-        """
-        if not isinstance(self.current_id, int):
-            raise TypeError(f"current_id must be int, got {type(self.current_id).__name__}")
-        if url not in self.url_map:
-            self.current_id += 1
-            self.url_map[url] = self.current_id
-        return self.url_map[url]
+        record = add_source_url(url=url, database_url=self.database_url)
+        self.url_map[url] = record.id
+        self.current_id = max(self.current_id, record.id)
+        return record.id
 
     @staticmethod
     def add_source_to_candidate(
@@ -327,7 +323,7 @@ class DownloadSource:
             source_url = source[source_url_key]
             hostname = url_to_hostname(source_url)
             if hostname is None:
-                logger.warning(f"Failed to parse hostname from URL: {source_url}")
+                logger.warning(f"Failed to parse hostname from URL: {source_url}:{source}")
                 return False
 
             # 获取或创建 URL ID
@@ -518,22 +514,19 @@ class DownloadSource:
         """
         logger.info("Loading persisted data")
 
-        # 加载 URL 映射
-        if os.path.exists(self.pkl_url):
-            try:
-                data = self._extract_persisted_items(self._load_json_safely(self.pkl_url))
-                self.url_map = self._normalize_url_map(data)
-            except (IOError, json.JSONDecodeError):
-                logger.warning("Failed to load URL map, using default")
-                self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
-            except (KeyError, TypeError, ValueError) as e:
-                logger.warning(f"Invalid URL map data, using default: {e}")
-                self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
-        else:
-            self.url_map = {DEFAULT_BACKUP_HOST: DEFAULT_BACKUP_ID}
+        # 从数据库加载 URL 映射
+        try:
+            from funread.legado.manage import load_source_url_map
+
+            self.url_map = load_source_url_map(database_url=self.database_url)
+        except ValueError:
+            self.url_map = {}
+        except Exception as e:
+            logger.warning(f"Failed to load URL map from database: {e}")
+            self.url_map = {}
 
         # 更新当前 ID
-        self.current_id = max(self.url_map.values()) if self.url_map else 1
+        self.current_id = max(self.url_map.values()) if self.url_map else DEFAULT_BACKUP_ID - 1
 
         # 加载 MD5 索引
         if os.path.exists(self.pkl_md5):
@@ -562,10 +555,7 @@ class DownloadSource:
         self._ensure_directories()
 
         try:
-            # 保存 URL 映射
-            if self.url_map:
-                url_data = [{"url": k, "url_id": v} for k, v in self.url_map.items()]
-                self._save_json_safely(self.pkl_url, {"data": url_data})
+            # URL 映射已持久化到数据库
 
             # 保存 MD5 索引
             if self.md5_set:
