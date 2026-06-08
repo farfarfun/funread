@@ -323,7 +323,7 @@ class DownloadSource:
             source_url = source[source_url_key]
             hostname = url_to_hostname(source_url)
             if hostname is None:
-                logger.warning(f"Failed to parse hostname from URL: {source_url}:{source}")
+                logger.warning(f"Failed to parse hostname from URL: {source_url}")
                 return False
 
             # 获取或创建 URL ID
