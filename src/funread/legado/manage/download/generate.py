@@ -174,7 +174,7 @@ class GenerateSourceType:
         github_link = td()
         github_link += a(
             "github",
-            href=f"yuedu://{self.source_type}/importonline?src=https://github.com/{self.repo_str}/raw/master/{file['path']}",
+            href=f"yuedu://{self.source_type}/importonline?src=https://github.com/{self.repo_str}/raw/master/{file['fid']}",
         )
         data_tr += github_link
 
@@ -182,7 +182,7 @@ class GenerateSourceType:
         gitee_link = td()
         gitee_link += a(
             "gitee",
-            href=f"yuedu://{self.source_type}/importonline?src=https://gitee.com/{self.repo_str}/raw/master/{file['path']}",
+            href=f"yuedu://{self.source_type}/importonline?src=https://gitee.com/{self.repo_str}/raw/master/{file['fid']}",
         )
         data_tr += gitee_link
 
