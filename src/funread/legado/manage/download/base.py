@@ -194,7 +194,7 @@ class DownloadSource:
     def persist_download_record(self, url: str, source_data: Any) -> None:
         """将下载 URL 与源数量写入数据库，数据库未配置时静默跳过"""
         try:
-            from funread.legado.manage import upsert_source_download_record
+            from funread.legado.manage import upsert_source_list_record
 
             if isinstance(source_data, list):
                 source_count = len(source_data)
@@ -210,7 +210,7 @@ class DownloadSource:
             else:
                 source_count = 0
 
-            upsert_source_download_record(
+            upsert_source_list_record(
                 download_url=url,
                 source_type=self.cate1,
                 source_count=source_count,
@@ -225,9 +225,11 @@ class DownloadSource:
         if url in self.url_map:
             return self.url_map[url]
 
-        from funread.legado.manage import add_source_url
+        from funread.legado.manage import add_source_detail_url
 
-        record = add_source_url(url=url, database_url=self.database_url)
+        record = add_source_detail_url(
+            url=url, source_type=self.cate1, database_url=self.database_url
+        )
         self.url_map[url] = record.id
         self.current_id = max(self.current_id, record.id)
         return record.id
@@ -516,9 +518,11 @@ class DownloadSource:
 
         # 从数据库加载 URL 映射
         try:
-            from funread.legado.manage import load_source_url_map
+            from funread.legado.manage import load_source_detail_url_map
 
-            self.url_map = load_source_url_map(database_url=self.database_url)
+            self.url_map = load_source_detail_url_map(
+                source_type=self.cate1, database_url=self.database_url
+            )
         except ValueError:
             self.url_map = {}
         except Exception as e:

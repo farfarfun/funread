@@ -3,7 +3,7 @@
 from typing import Any, Dict
 
 from funread.legado.manage.download.base import DownloadSource
-from funread.legado.manage.source_download import iter_source_download_data
+from funread.legado.manage.source_download import iter_source_list_data
 from funread.legado.manage.utils import retain_zh_ch_dig
 
 
@@ -140,7 +140,7 @@ class BookSourceDownload(DownloadSource):
 
     def loader(self) -> None:
         """从 URL 记录迭代器中加载书源数据"""
-        for _, data in iter_source_download_data(source_type=self.cate1):
+        for _, data in iter_source_list_data(source_type=self.cate1):
             self.add_sources(data)
 
     def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:

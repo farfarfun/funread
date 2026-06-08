@@ -5,7 +5,7 @@ import funread.legado.manage.download.rss as rss_module
 
 from funread.legado.manage.download.base import DownloadSource
 from funread.legado.manage.download.book import BookSourceDownload
-from funread.legado.manage.source_download import add_source_url
+from funread.legado.manage.source_download import add_source_detail_url
 
 
 class DummyDownloadSource(DownloadSource):
@@ -18,8 +18,12 @@ class DummyDownloadSource(DownloadSource):
 
 def test_loads_reads_url_map_from_source_table(tmp_path: Path) -> None:
     db_url = f"sqlite:///{tmp_path / 'download_base.db'}"
-    add_source_url(url="https://a.example", source_id=10000007, database_url=db_url)
-    add_source_url(url="https://b.example", source_id=10000008, database_url=db_url)
+    add_source_detail_url(
+        url="https://a.example", source_type="rss", source_id=10000007, database_url=db_url
+    )
+    add_source_detail_url(
+        url="https://b.example", source_type="rss", source_id=10000008, database_url=db_url
+    )
     source = DummyDownloadSource(path=str(tmp_path), cate1="rss", database_url=db_url)
 
     source.loads()
@@ -59,7 +63,7 @@ def test_book_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr(
         book_module,
-        "iter_source_download_data",
+        "iter_source_list_data",
         lambda source_type: iter(
             [
                 (
@@ -84,7 +88,7 @@ def test_rss_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr(
         rss_module,
-        "iter_source_download_data",
+        "iter_source_list_data",
         lambda source_type: iter(
             [
                 (
