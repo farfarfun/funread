@@ -191,14 +191,28 @@ class DownloadSource:
         return "sourceUrl"
 
     def persist_download_record(self, url: str, source_data: Any) -> None:
-        """将下载 URL 与源数据写入数据库，数据库未配置时静默跳过"""
+        """将下载 URL 与源数量写入数据库，数据库未配置时静默跳过"""
         try:
             from funread.legado.manage import upsert_source_download_record
+
+            if isinstance(source_data, list):
+                source_count = len(source_data)
+            elif isinstance(source_data, dict):
+                if isinstance(source_data.get("list"), list):
+                    source_count = len(source_data["list"])
+                elif isinstance(source_data.get("data"), list):
+                    source_count = len(source_data["data"])
+                elif "error" in source_data:
+                    source_count = 0
+                else:
+                    source_count = 1
+            else:
+                source_count = 0
 
             upsert_source_download_record(
                 download_url=url,
                 source_type=self.cate1,
-                source_data=source_data,
+                source_count=source_count,
             )
         except ValueError:
             return

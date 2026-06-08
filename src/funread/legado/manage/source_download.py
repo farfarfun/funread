@@ -1,11 +1,16 @@
 """Source download record persistence."""
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
+import requests
+from nltlog import getLogger
 from nltsecret import read_secret
-from sqlalchemy import JSON, DateTime, String, create_engine, select
+from sqlalchemy import DateTime, Integer, String, create_engine, desc, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+
+logger = getLogger("funread")
 
 
 class Base(DeclarativeBase):
@@ -25,7 +30,7 @@ class SourceDownloadRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     download_url: Mapped[str] = mapped_column(String(1024), unique=True, index=True, nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    source_data: Mapped[Any] = mapped_column(JSON, nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -55,14 +60,6 @@ def _get_database_url(database_url: Optional[str] = None) -> Optional[str]:
         pass
 
     return None
-
-
-def _normalize_source_data(source_data: Any) -> Any:
-    if source_data is None:
-        return {}
-    if isinstance(source_data, (dict, list, str, int, float, bool)):
-        return source_data
-    return {"value": repr(source_data)}
 
 
 def _get_engine(database_url: Optional[str] = None):
@@ -99,10 +96,102 @@ def init_source_download_db(database_url: Optional[str] = None) -> None:
     _INITIALIZED_DATABASES.add(resolved_url)
 
 
+def _count_source_items(source_data: Any) -> int:
+    if isinstance(source_data, list):
+        return len(source_data)
+    if isinstance(source_data, dict):
+        if isinstance(source_data.get("list"), list):
+            return len(source_data["list"])
+        if isinstance(source_data.get("data"), list):
+            return len(source_data["data"])
+        return 1
+    return -1
+
+
+def _build_source_download_query(
+    source_type: Optional[str] = None,
+    min_source_count: Optional[int] = None,
+    max_source_count: Optional[int] = None,
+):
+    stmt = select(SourceDownloadRecord)
+    if source_type:
+        stmt = stmt.where(SourceDownloadRecord.source_type == source_type)
+    if min_source_count is not None:
+        stmt = stmt.where(SourceDownloadRecord.source_count >= min_source_count)
+    if max_source_count is not None:
+        stmt = stmt.where(SourceDownloadRecord.source_count <= max_source_count)
+    return stmt.order_by(desc(SourceDownloadRecord.last_queried_at), desc(SourceDownloadRecord.id))
+
+
+def iter_source_download_data(
+    source_type: Optional[str] = None,
+    min_source_count: Optional[int] = None,
+    max_source_count: Optional[int] = None,
+    limit: Optional[int] = None,
+    timeout: int = 30,
+    database_url: Optional[str] = None,
+) -> Iterator[Any]:
+    """Yield source payloads for matching URLs ordered by last query time descending."""
+    init_source_download_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        stmt = _build_source_download_query(
+            source_type=source_type,
+            min_source_count=min_source_count,
+            max_source_count=max_source_count,
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        records: List[SourceDownloadRecord] = session.execute(stmt).scalars().all()
+
+    for record in records:
+        queried_at = utcnow()
+        try:
+            response = requests.get(record.download_url, timeout=timeout)
+            response.raise_for_status()
+            source_data = response.json()
+            source_count = _count_source_items(source_data)
+            upsert_source_download_record(
+                download_url=record.download_url,
+                source_type=record.source_type,
+                source_count=source_count,
+                queried_at=queried_at,
+                database_url=database_url,
+            )
+            yield source_data
+        except Exception as e:
+            logger.warning(f"Failed to fetch source data from {record.download_url}: {e}")
+            upsert_source_download_record(
+                download_url=record.download_url,
+                source_type=record.source_type,
+                source_count=-1,
+                queried_at=queried_at,
+                database_url=database_url,
+            )
+
+
+def add_source_download_url(
+    download_url: str,
+    source_type: str,
+    source_count: int = -1,
+    queried_at: Optional[datetime] = None,
+    database_url: Optional[str] = None,
+) -> SourceDownloadRecord:
+    """Add or update a source download URL record with a default unknown count."""
+    return upsert_source_download_record(
+        download_url=download_url,
+        source_type=source_type,
+        source_count=source_count,
+        queried_at=queried_at,
+        database_url=database_url,
+    )
+
+
 def upsert_source_download_record(
     download_url: str,
     source_type: str,
-    source_data: Any,
+    source_count: int,
     queried_at: Optional[datetime] = None,
     database_url: Optional[str] = None,
 ) -> SourceDownloadRecord:
@@ -112,7 +201,7 @@ def upsert_source_download_record(
         raise ValueError("source_type is required")
 
     queried_at = queried_at or utcnow()
-    normalized_data = _normalize_source_data(source_data)
+    normalized_count = int(source_count)
 
     init_source_download_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
@@ -126,13 +215,13 @@ def upsert_source_download_record(
             record = SourceDownloadRecord(
                 download_url=download_url,
                 source_type=source_type,
-                source_data=normalized_data,
+                source_count=normalized_count,
                 last_queried_at=queried_at,
             )
             session.add(record)
         else:
             record.source_type = source_type
-            record.source_data = normalized_data
+            record.source_count = normalized_count
             record.last_queried_at = queried_at
 
         session.commit()
