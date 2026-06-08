@@ -2,17 +2,9 @@
 
 from typing import Any, Dict
 
-import requests
-from funfake.headers import Headers
-from nltlog import getLogger
-from funutil.cache import disk_cache
-from tqdm import tqdm
-
 from funread.legado.manage.download.base import DownloadSource
+from funread.legado.manage.source_download import iter_source_download_data
 from funread.legado.manage.utils import retain_zh_ch_dig
-
-logger = getLogger("funread")
-faker = Headers()
 
 
 class RSSSourceFormat:
@@ -85,32 +77,7 @@ class RSSSourceDownload(DownloadSource):
         """
         return RSSSourceFormat(source).run()
 
-    def loader(self):
-        urls = [
-            "https://agit.ai/butterfly/yd/raw/branch/yd/迷迭订阅源.json",
-        ]
-        urls.extend(
-            [f"https://www.yckceo.com/yuedu/rsss/json/id/{_id}.json" for _id in range(0, 250)]
-        )
-        urls.extend(
-            [f"https://www.yckceo.com/yuedu/rss/json/id/{_id}.json" for _id in range(0, 500)]
-        )
-
-        cache_path = f"{self.path_rot}/../cache"
-        logger.info(f"cache_path:{cache_path}")
-
-        @disk_cache(cache_key="url", cache_dir=cache_path, expire=3600 * 24 * 7)
-        def load_data(url: str) -> dict:
-            try:
-                return requests.get(url, headers=faker.generate()).json()
-            except Exception as e:
-                # logger.error(f"error: {e},traceback: {traceback.format_exc()}")
-                return {}
-
-        for _url in tqdm(urls):
-            try:
-                data = load_data(_url)
-                self.persist_download_record(_url, data)
-                self.add_sources(data)
-            except Exception as e:
-                logger.info(f"error:{e}")
+    def loader(self) -> None:
+        """从 URL 记录迭代器中加载 RSS 源数据"""
+        for _, data in iter_source_download_data(source_type=self.cate1):
+            self.add_sources(data)

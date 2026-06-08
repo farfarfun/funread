@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import funread.legado.manage.download.book as book_module
+import funread.legado.manage.download.rss as rss_module
+
 from funread.legado.manage.download.base import DownloadSource
 from funread.legado.manage.download.book import BookSourceDownload
 
@@ -52,3 +55,50 @@ def test_book_source_download_accepts_book_source_url(tmp_path: Path) -> None:
     assert added is True
     exported = next(source.export_sources(size=10))
     assert exported[0]["bookSourceUrl"].startswith("https://books.example.com/api#")
+
+
+def test_book_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path) -> None:
+    source = book_module.BookSourceDownload(path=str(tmp_path), cate1="book")
+
+    monkeypatch.setattr(
+        book_module,
+        "iter_source_download_data",
+        lambda source_type: iter(
+            [
+                (
+                    object(),
+                    {
+                        "bookSourceUrl": "https://books.example.com/api/",
+                        "bookSourceName": "Example Book",
+                    },
+                )
+            ]
+        ),
+    )
+
+    source.loader()
+
+    exported = next(source.export_sources(size=10))
+    assert exported[0]["bookSourceUrl"].startswith("https://books.example.com/api#")
+
+
+def test_rss_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path) -> None:
+    source = rss_module.RSSSourceDownload(path=str(tmp_path), cate1="rss")
+
+    monkeypatch.setattr(
+        rss_module,
+        "iter_source_download_data",
+        lambda source_type: iter(
+            [
+                (
+                    object(),
+                    {"sourceUrl": "https://rss.example.com/feed/", "sourceName": "Example RSS"},
+                )
+            ]
+        ),
+    )
+
+    source.loader()
+
+    exported = next(source.export_sources(size=10))
+    assert exported[0]["sourceUrl"].startswith("https://rss.example.com/feed#")

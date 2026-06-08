@@ -1,8 +1,9 @@
 """书源下载和管理模块"""
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from funread.legado.manage.download.base import DownloadSource
+from funread.legado.manage.source_download import iter_source_download_data
 from funread.legado.manage.utils import retain_zh_ch_dig
 
 
@@ -130,11 +131,6 @@ class BookSourceFormat:
         self.__format_base("ruleToc", map)
 
 
-BOOK_SOURCE_URLS: List[str] = [
-    "https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan",
-]
-
-
 class BookSourceDownload(DownloadSource):
     """书源下载器，继承自 DownloadSource"""
 
@@ -143,9 +139,9 @@ class BookSourceDownload(DownloadSource):
         return "bookSourceUrl"
 
     def loader(self) -> None:
-        """加载公开书源列表"""
-        for url in BOOK_SOURCE_URLS:
-            self.add_sources(url)
+        """从 URL 记录迭代器中加载书源数据"""
+        for _, data in iter_source_download_data(source_type=self.cate1):
+            self.add_sources(data)
 
     def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
         """
