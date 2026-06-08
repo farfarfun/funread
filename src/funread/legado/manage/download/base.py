@@ -186,6 +186,10 @@ class DownloadSource:
         """
         raise NotImplementedError("Subclass must implement source_format() method")
 
+    def get_source_url_key(self) -> str:
+        """返回当前源类型使用的 URL 字段名"""
+        return "sourceUrl"
+
     def url_index(self, url: str) -> int:
         """
         获取或创建 URL 的索引 ID
@@ -275,7 +279,8 @@ class DownloadSource:
         Returns:
             是否成功添加
         """
-        if source is None or len(source) == 0 or "sourceUrl" not in source:
+        source_url_key = self.get_source_url_key()
+        if source is None or len(source) == 0 or source_url_key not in source:
             return False
         try:
             # 计算 MD5
@@ -285,14 +290,15 @@ class DownloadSource:
             source = self.source_format(source)
 
             # 验证必需的字段
-            if "sourceUrl" not in source:
-                logger.warning("Source missing 'sourceUrl' field, skipping")
+            if source_url_key not in source:
+                logger.warning(f"Source missing '{source_url_key}' field, skipping")
                 return False
 
             # 获取主机名
-            hostname = url_to_hostname(source["sourceUrl"])
+            source_url = source[source_url_key]
+            hostname = url_to_hostname(source_url)
             if hostname is None:
-                logger.warning(f"Failed to parse hostname from URL: {source['sourceUrl']}")
+                logger.warning(f"Failed to parse hostname from URL: {source_url}")
                 return False
 
             # 获取或创建 URL ID
@@ -451,9 +457,10 @@ class DownloadSource:
 
                         source = item["source"].copy()
                         # 添加 MD5 片段到 URL
-                        if "sourceUrl" in source and item["md5_list"]:
-                            source["sourceUrl"] = (
-                                f"{source['sourceUrl']}#{item['md5_list'][0][:10]}"
+                        source_url_key = self.get_source_url_key()
+                        if source_url_key in source and item["md5_list"]:
+                            source[source_url_key] = (
+                                f"{source[source_url_key]}#{item['md5_list'][0][:10]}"
                             )
                         if "customOrder" in data:
                             source["customOrder"] = data["customOrder"]

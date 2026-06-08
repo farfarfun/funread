@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from funread.legado.manage.download.base import DownloadSource
+from funread.legado.manage.download.book import BookSourceDownload
 
 
 class DummyDownloadSource(DownloadSource):
@@ -36,3 +37,18 @@ def test_loads_skips_invalid_url_map_items(tmp_path: Path) -> None:
     assert source.url_map["https://a.example"] == 9
     assert "https://b.example" not in source.url_map
     assert source.current_id == max(source.url_map.values())
+
+
+def test_book_source_download_accepts_book_source_url(tmp_path: Path) -> None:
+    source = BookSourceDownload(path=str(tmp_path), cate1="book")
+
+    added = source.add_source(
+        {
+            "bookSourceUrl": "https://books.example.com/api/",
+            "bookSourceName": "Example Book",
+        }
+    )
+
+    assert added is True
+    exported = next(source.export_sources(size=10))
+    assert exported[0]["bookSourceUrl"].startswith("https://books.example.com/api#")

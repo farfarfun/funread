@@ -10,6 +10,7 @@ from nltlog import getLogger
 from funsecret import read_secret
 from nlttask import Task
 import traceback
+from funread.legado.manage.download.book import BookSourceDownload
 from funread.legado.manage.download.rss import RSSSourceDownload
 
 logger = getLogger("funread")
@@ -156,6 +157,12 @@ class GenerateSourceType:
             branch="master",
         )
 
+    def get_downloader(self, path: str):
+        """根据源类型创建对应下载器"""
+        if self.source_type == "booksource":
+            return BookSourceDownload(path=path, cate1="book")
+        return RSSSourceDownload(path=path, cate1="rss")
+
     def set_table_head(self) -> None:
         """设置表格头"""
         with tr():
@@ -231,7 +238,7 @@ class GenerateSourceType:
     def _load_and_backup(self, path: str) -> None:
         """加载并备份数据"""
         try:
-            with RSSSourceDownload(path=path, cate1="rss") as runner:
+            with self.get_downloader(path) as runner:
                 runner.loader()
                 runner.dumps_zip()
                 logger.info("Data loaded and backed up successfully")
@@ -242,7 +249,7 @@ class GenerateSourceType:
     def _export_and_upload(self, path: str) -> None:
         """导出并上传数据"""
         try:
-            with RSSSourceDownload(path=path, cate1="rss") as runner:
+            with self.get_downloader(path) as runner:
                 funos.delete(runner.path_pkl)
                 funos.delete(runner.path_bok)
                 runner.loads_zip()
