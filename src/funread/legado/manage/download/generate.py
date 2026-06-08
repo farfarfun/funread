@@ -9,7 +9,7 @@ from nltfile import funos
 from nltlog import getLogger
 from funsecret import read_secret
 from nlttask import Task
-
+import traceback
 from funread.legado.manage.download.rss import RSSSourceDownload
 
 logger = getLogger("funread")
@@ -198,7 +198,7 @@ class GenerateSourceType:
                     if file["name"].endswith(".json"):
                         self.fill_table_data(file)
             except Exception as e:
-                logger.error(f"Failed to generate table: {e}")
+                logger.error(f"Failed to generate table: {e}\n{traceback.format_exc()}")
 
     def generate_html_report(self) -> str:
         """生成 HTML 报告"""
