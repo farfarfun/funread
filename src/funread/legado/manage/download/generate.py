@@ -1,11 +1,9 @@
 """HTML生成和源文件管理模块"""
 
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 import re
-import tempfile
 from dominate.tags import *
 from fundrive.drives.github import GithubDrive
 from nltfile import funos
@@ -163,6 +161,13 @@ class GenerateSourceType:
             branch="master",
         )
 
+    def _remember_source_count(self, *keys: Any, count: Any) -> None:
+        """缓存源个数，避免生成表格时再次请求远端文件。"""
+        count_text = str(count)
+        for key in keys:
+            if key:
+                self._source_count_cache[str(key)] = count_text
+
     def get_downloader(self, path: str):
         """根据源类型创建对应下载器"""
         if self.source_type == "booksource":
@@ -187,38 +192,23 @@ class GenerateSourceType:
         return f"{value:.1f} {units[unit_index]}"
 
     def extract_source_count(self, file: Dict[str, Any]) -> str:
-        """读取远端 JSON 文件并统计该批次源数量"""
+        """读取已缓存的源个数，避免生成 HTML 时额外请求远端文件。"""
         fid = str(file.get("fid", ""))
         name = str(file.get("name", ""))
-        if not fid or not name.endswith(".json"):
+        if not name.endswith(".json"):
             return "-"
         if fid in self._source_count_cache:
             return self._source_count_cache[fid]
+        if name in self._source_count_cache:
+            return self._source_count_cache[name]
 
-        temp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-                temp_path = tmp.name
-            if not self.drive.download_file(fid=fid, filepath=temp_path, overwrite=True):
-                self._source_count_cache[fid] = "-"
-                return "-"
-            with open(temp_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                count = str(len(data))
-            elif isinstance(data, dict) and isinstance(data.get("list"), list):
-                count = str(len(data["list"]))
-            else:
-                count = "-"
-            self._source_count_cache[fid] = count
-            return count
-        except Exception as e:
-            logger.warning(f"Failed to extract source count for {fid}: {e}")
-            self._source_count_cache[fid] = "-"
+        count = file.get("source_count")
+        if count is None:
             return "-"
-        finally:
-            if temp_path and Path(temp_path).exists():
-                funos.delete(temp_path)
+
+        count_text = str(count)
+        self._remember_source_count(fid, name, count=count_text)
+        return count_text
 
     def set_table_head(self) -> None:
         """设置表格头"""
@@ -331,12 +321,14 @@ class GenerateSourceType:
     def _upload_single_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
         """上传单个数据批次"""
         git_path = f"{self.dir_path}/progress-{counter}.json"
+        filename = f"progress-{counter}.json"
         self.drive.upload_file(
             content=json.dumps(data),
             fid=self.dir_path,
             filepath=None,
-            filename=f"progress-{counter}.json",
+            filename=filename,
         )
+        self._remember_source_count(git_path, filename, count=len(data))
         logger.info(f"Uploaded {len(data)} sources to {git_path}")
 
     def _upload_batch(self, data: List[Dict[str, Any]], counter: int) -> int:

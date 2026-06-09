@@ -149,17 +149,31 @@ def test_generate_source_type_formats_size_and_counts_sources(tmp_path: Path) ->
     generator = generate_module.GenerateSourceType.__new__(generate_module.GenerateSourceType)
     generator._source_count_cache = {}
 
-    class _Drive:
-        def download_file(self, fid, filepath, overwrite):
-            Path(filepath).write_text('[{"id": 1}, {"id": 2}, {"id": 3}]', encoding="utf-8")
-            return True
-
-    generator.drive = _Drive()
-
     assert generator.format_file_size(512) == "512 B"
     assert generator.format_file_size(1536) == "1.5 KB"
     assert generator.format_file_size(1024 * 1024) == "1.0 MB"
+    assert generator.extract_source_count({"fid": "a/b.json", "name": "b.json"}) == "-"
+    generator._remember_source_count("a/b.json", "b.json", count=3)
     assert generator.extract_source_count({"fid": "a/b.json", "name": "b.json"}) == "3"
+
+
+def test_upload_single_batch_caches_source_count() -> None:
+    generator = generate_module.GenerateSourceType.__new__(generate_module.GenerateSourceType)
+    generator.dir_path = "funread/legado/snapshot/lasted/book"
+    generator._source_count_cache = {}
+    generator.drive = _FakeDrive()
+
+    generator._upload_single_batch([{"i": 1}, {"i": 2}], 1000)
+
+    assert (
+        generator.extract_source_count(
+            {
+                "fid": "funread/legado/snapshot/lasted/book/progress-1000.json",
+                "name": "progress-1000.json",
+            }
+        )
+        == "2"
+    )
 
 
 def test_cleanup_stale_remote_batches_deletes_higher_counters() -> None:
