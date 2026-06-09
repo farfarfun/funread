@@ -832,6 +832,58 @@ def test_source_merge_runner_splits_large_merge_requests(tmp_path: Path) -> None
     assert calls == [2, 2, 2]
 
 
+def test_source_merge_runner_persists_chunk_progress_on_failure(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["m1"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search1"}},
+            {"md5_list": ["m2"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search2"}},
+            {"md5_list": ["m3"], "source": {"bookSourceName": "C", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search3"}},
+            {"md5_list": ["m4"], "source": {"bookSourceName": "D", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search4"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "books.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    class FakeMerger:
+        def merge_sources(self, source_type, hostname, versions):
+            calls.append(len(versions))
+            if len(calls) == 2:
+                raise ValueError("merge chunk failed")
+            return versions[0]
+
+    stats = SourceMergeRunner(
+        store=store,
+        merger=FakeMerger(),
+        max_versions_per_merge=2,
+        max_prompt_chars=1,
+    ).run()
+
+    data = LocalSourceStore._load_json_safely(str(source_path))
+
+    assert stats == {"processed": 1, "merged": 0, "skipped": 0, "failed": 1}
+    assert calls == [2, 2]
+    assert data["merged"] == []
+    assert len(data["candidate"]) == 3
+    assert data["candidate"][0]["source"]["bookSourceUrl"] == "https://books.example.com/api"
+    assert data["candidate"][0]["md5_list"][1:] == ["m1", "m2"]
+    assert data["candidate"][1]["md5_list"] == ["m3"]
+    assert data["candidate"][2]["md5_list"] == ["m4"]
+
+
 def test_sync_local_source_records_task_updates_mysql_tables(tmp_path: Path) -> None:
     db_url = f"sqlite:///{tmp_path / 'sync_source.db'}"
     store = BookSourceProcessor(path=str(tmp_path), cate1="book", database_url=db_url)

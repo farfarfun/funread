@@ -39,6 +39,9 @@ class SourceMerger(Protocol):
         """Merge multiple versions into one final source object."""
 
 
+VersionItem = Dict[str, Any]
+
+
 class OpenAICompatibleSourceMerger:
     """Default LLM-based merger using an OpenAI-compatible API."""
 
@@ -328,38 +331,38 @@ class SourceMergeRunner:
     def merge_file(self, file_path: str) -> str:
         try:
             data = self.store._load_json_safely(file_path)
-            versions = self._collect_versions(data)
-            if len(versions) < self.min_versions:
+            version_items = self._collect_version_items(data)
+            if len(version_items) < self.min_versions:
                 logger.info(
-                    f"Skip merge source file: file={file_path}, versions={len(versions)}, "
+                    f"Skip merge source file: file={file_path}, versions={len(version_items)}, "
                     f"min_versions={self.min_versions}"
                 )
                 return "skipped"
             hostname = str(data.get("hostname") or "")
             logger.info(
                 "Prepare merge source file: "
-                f"file={file_path}, hostname={hostname}, versions={len(versions)}"
+                f"file={file_path}, hostname={hostname}, versions={len(version_items)}"
             )
-            merged_source = self._merge_versions_progressively(hostname=hostname, versions=versions)
-            validated_source = self._validate_merged_source(
-                source=merged_source,
-                expected_hostname=hostname,
+            merged_item = self._merge_version_items_progressively(
+                file_path=file_path,
+                data=data,
+                hostname=hostname,
+                version_items=version_items,
             )
-            merged_md5_list = self._build_merged_md5_list(data, validated_source)
-            data["merged"] = [{"md5_list": merged_md5_list, "source": validated_source}]
+            data["merged"] = [merged_item]
             data["candidate"] = []
             self.store._save_json_safely(file_path, data)
             logger.info(
                 "Merged source successfully: "
-                f"file={file_path}, hostname={hostname}, versions={len(versions)}"
+                f"file={file_path}, hostname={hostname}, versions={len(version_items)}"
             )
             return "merged"
         except Exception as e:
             logger.warning(f"Failed to merge source file {file_path}: {e}")
             return "failed"
 
-    def _collect_versions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        versions: List[Dict[str, Any]] = []
+    def _collect_version_items(self, data: Dict[str, Any]) -> List[VersionItem]:
+        version_items: List[VersionItem] = []
         for key in ("merged", "candidate"):
             items = data.get(key, [])
             if not isinstance(items, list):
@@ -367,64 +370,96 @@ class SourceMergeRunner:
             for item in items:
                 source = item.get("source")
                 if isinstance(source, dict):
-                    versions.append(copy.deepcopy(source))
-        return versions
+                    md5_list = item.get("md5_list", [])
+                    version_items.append(
+                        {
+                            "md5_list": [value for value in md5_list if isinstance(value, str)],
+                            "source": copy.deepcopy(source),
+                        }
+                    )
+        return version_items
+
+    def _collect_versions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return [item["source"] for item in self._collect_version_items(data)]
 
     def _read_version_count(self, file_path: str) -> int:
         try:
             data = self.store._load_json_safely(file_path)
         except Exception:
             return 0
-        return len(self._collect_versions(data))
+        return len(self._collect_version_items(data))
 
-    def _estimate_versions_size(self, versions: List[Dict[str, Any]]) -> int:
-        return len(json.dumps(versions, ensure_ascii=False))
+    def _estimate_version_items_size(self, version_items: List[VersionItem]) -> int:
+        return len(json.dumps([item["source"] for item in version_items], ensure_ascii=False))
 
-    def _split_versions(self, versions: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-        chunks: List[List[Dict[str, Any]]] = []
-        current: List[Dict[str, Any]] = []
+    def _split_version_items(self, version_items: List[VersionItem]) -> List[List[VersionItem]]:
+        chunks: List[List[VersionItem]] = []
+        current: List[VersionItem] = []
         current_size = 0
-        for version in versions:
-            version_size = len(json.dumps(version, ensure_ascii=False))
+        for version_item in version_items:
+            version_size = len(json.dumps(version_item["source"], ensure_ascii=False))
             exceeds_count = len(current) >= self.max_versions_per_merge
             exceeds_size = current and current_size + version_size > self.max_prompt_chars
             if exceeds_count or exceeds_size:
                 chunks.append(current)
                 current = []
                 current_size = 0
-            current.append(version)
+            current.append(copy.deepcopy(version_item))
             current_size += version_size
         if current:
             chunks.append(current)
+        if len(chunks) == len(version_items) and len(version_items) > 1:
+            return self._group_version_items_by_count(version_items)
         return chunks
 
-    def _merge_versions_progressively(
-        self, hostname: str, versions: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        if len(versions) < self.min_versions:
+    def _group_version_items_by_count(
+        self, version_items: List[VersionItem]
+    ) -> List[List[VersionItem]]:
+        group_size = max(2, self.max_versions_per_merge)
+        grouped_chunks: List[List[VersionItem]] = []
+        for start in range(0, len(version_items), group_size):
+            grouped_chunks.append(copy.deepcopy(version_items[start : start + group_size]))
+        return grouped_chunks
+
+    def _merge_version_items_progressively(
+        self,
+        file_path: str,
+        data: Dict[str, Any],
+        hostname: str,
+        version_items: List[VersionItem],
+    ) -> VersionItem:
+        if len(version_items) < self.min_versions:
             raise ValueError("Not enough versions to merge")
 
         if (
-            len(versions) <= self.max_versions_per_merge
-            and self._estimate_versions_size(versions) <= self.max_prompt_chars
+            len(version_items) <= self.max_versions_per_merge
+            and self._estimate_version_items_size(version_items) <= self.max_prompt_chars
         ):
             logger.info(
                 "Merge source chunk directly: "
-                f"hostname={hostname}, versions={len(versions)}, "
-                f"chars={self._estimate_versions_size(versions)}"
+                f"hostname={hostname}, versions={len(version_items)}, "
+                f"chars={self._estimate_version_items_size(version_items)}"
             )
-            return self.merger.merge_sources(
+            merged_source = self.merger.merge_sources(
                 source_type=self.store.cate1,
                 hostname=hostname,
-                versions=versions,
+                versions=[item["source"] for item in version_items],
             )
+            validated_source = self._validate_merged_source(
+                source=merged_source,
+                expected_hostname=hostname,
+            )
+            return {
+                "md5_list": self._build_merged_md5_list_from_items(version_items, validated_source),
+                "source": validated_source,
+            }
 
-        chunks = self._split_versions(versions)
+        chunks = self._split_version_items(version_items)
         logger.info(
             "Split merge source into chunks: "
-            f"hostname={hostname}, versions={len(versions)}, chunks={len(chunks)}"
+            f"hostname={hostname}, versions={len(version_items)}, chunks={len(chunks)}"
         )
-        merged_chunks: List[Dict[str, Any]] = []
+        merged_chunks: List[VersionItem] = []
         for index, chunk in enumerate(chunks, start=1):
             if len(chunk) == 1:
                 logger.info(
@@ -432,23 +467,76 @@ class SourceMergeRunner:
                     f"hostname={hostname}, chunk={index}/{len(chunks)}"
                 )
                 merged_chunks.append(copy.deepcopy(chunk[0]))
+                self._save_merge_checkpoint(
+                    file_path=file_path,
+                    data=data,
+                    processed_items=merged_chunks,
+                    remaining_chunks=chunks[index:],
+                )
                 continue
             logger.info(
                 "Merge source chunk: "
                 f"hostname={hostname}, chunk={index}/{len(chunks)}, "
-                f"versions={len(chunk)}, chars={self._estimate_versions_size(chunk)}"
+                f"versions={len(chunk)}, chars={self._estimate_version_items_size(chunk)}"
+            )
+            merged_source = self.merger.merge_sources(
+                source_type=self.store.cate1,
+                hostname=hostname,
+                versions=[item["source"] for item in chunk],
+            )
+            validated_source = self._validate_merged_source(
+                source=merged_source,
+                expected_hostname=hostname,
             )
             merged_chunks.append(
-                self.merger.merge_sources(
-                    source_type=self.store.cate1,
-                    hostname=hostname,
-                    versions=chunk,
-                )
+                {
+                    "md5_list": self._build_merged_md5_list_from_items(chunk, validated_source),
+                    "source": validated_source,
+                }
+            )
+            self._save_merge_checkpoint(
+                file_path=file_path,
+                data=data,
+                processed_items=merged_chunks,
+                remaining_chunks=chunks[index:],
             )
 
         if len(merged_chunks) == 1:
             return merged_chunks[0]
-        return self._merge_versions_progressively(hostname=hostname, versions=merged_chunks)
+        return self._merge_version_items_progressively(
+            file_path=file_path,
+            data=data,
+            hostname=hostname,
+            version_items=merged_chunks,
+        )
+
+    def _save_merge_checkpoint(
+        self,
+        file_path: str,
+        data: Dict[str, Any],
+        processed_items: List[VersionItem],
+        remaining_chunks: List[List[VersionItem]],
+    ) -> None:
+        remaining_items: List[VersionItem] = []
+        for chunk in remaining_chunks:
+            remaining_items.extend(copy.deepcopy(chunk))
+        checkpoint_data = copy.deepcopy(data)
+        checkpoint_data["merged"] = []
+        checkpoint_data["candidate"] = copy.deepcopy(processed_items) + remaining_items
+        self.store._save_json_safely(file_path, checkpoint_data)
+
+    def _build_merged_md5_list_from_items(
+        self, version_items: List[VersionItem], merged_source: Dict[str, Any]
+    ) -> List[str]:
+        merged_md5 = self._compute_md5(merged_source)
+        seen = {merged_md5}
+        md5_list = [merged_md5]
+        for item in version_items:
+            for value in item.get("md5_list", []):
+                if isinstance(value, str) and value not in seen:
+                    seen.add(value)
+                    md5_list.append(value)
+        return md5_list
 
     def _build_merged_md5_list(
         self, data: Dict[str, Any], merged_source: Dict[str, Any]
