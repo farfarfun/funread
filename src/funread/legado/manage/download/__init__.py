@@ -1,27 +1,24 @@
-"""Source download pipeline package."""
+"""Source download package."""
 
 from .core import (
     DEFAULT_BACKUP_HOST,
     DEFAULT_BACKUP_ID,
     DEFAULT_DIR_PATH,
     DEFAULT_REPO,
+    DownloadSourceDataTask,
+    DumpSourceBackupTask,
     EXPORT_BATCH_SIZE,
     INITIAL_COUNTER,
+    LoadSourceBackupTask,
     LocalSourceStore,
     MAX_PICKLE_SIZE,
     MIN_UPLOAD_BATCH_SIZE,
     REQUEST_TIMEOUT,
     SourceProcessor,
+    SourceStoreTask,
 )
-from .pipeline import (
-    BackupSourceDataTask,
-    FetchSourceDataTask,
-    PublishSourceReportTask,
-    RestoreSourceDataTask,
-    RunSourcePipelineTask,
-    SourcePipelineContext,
-    UploadSourceBatchesTask,
-)
+from .context import SourceBuildContext
+from .reporting import PublishSourceReportTask, UploadSourceBatchesTask
 from .sources import (
     BookSourceFormat,
     BookSourceProcessor,
@@ -29,18 +26,21 @@ from .sources import (
     RSSSourceProcessor,
     SourceStoreFactory,
 )
+from .task import GenerateSourceTask
 
 __all__ = [
-    "BackupSourceDataTask",
     "BookSourceFormat",
     "BookSourceProcessor",
     "DEFAULT_BACKUP_HOST",
     "DEFAULT_BACKUP_ID",
     "DEFAULT_DIR_PATH",
     "DEFAULT_REPO",
+    "DownloadSourceDataTask",
+    "DumpSourceBackupTask",
     "EXPORT_BATCH_SIZE",
-    "FetchSourceDataTask",
+    "GenerateSourceTask",
     "INITIAL_COUNTER",
+    "LoadSourceBackupTask",
     "LocalSourceStore",
     "MAX_PICKLE_SIZE",
     "MIN_UPLOAD_BATCH_SIZE",
@@ -48,10 +48,9 @@ __all__ = [
     "RSSSourceFormat",
     "RSSSourceProcessor",
     "REQUEST_TIMEOUT",
-    "RestoreSourceDataTask",
-    "RunSourcePipelineTask",
-    "SourcePipelineContext",
+    "SourceBuildContext",
     "SourceProcessor",
+    "SourceStoreTask",
     "SourceStoreFactory",
     "UploadSourceBatchesTask",
 ]

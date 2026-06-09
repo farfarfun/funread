@@ -1,24 +1,21 @@
-"""Source pipeline orchestration task."""
+"""Source generation orchestration task."""
 
 from typing import Any, Dict
 
-from nltlog import getLogger
 from funsecret import read_secret
+from nltlog import getLogger
 from nlttask import Task
 
-from ..core.constants import DEFAULT_DIR_PATH, DEFAULT_REPO
-from .backup import BackupSourceDataTask
-from .context import SourcePipelineContext
-from .fetch import FetchSourceDataTask
-from .publish import PublishSourceReportTask
-from .restore import RestoreSourceDataTask
-from .upload import UploadSourceBatchesTask
+from .context import SourceBuildContext
+from .core.constants import DEFAULT_DIR_PATH, DEFAULT_REPO
+from .core.store import DownloadSourceDataTask, DumpSourceBackupTask, LoadSourceBackupTask
+from .reporting.remote import PublishSourceReportTask, UploadSourceBatchesTask
 
 
 logger = getLogger("funread")
 
 
-class RunSourcePipelineTask(Task):
+class GenerateSourceTask(Task):
     """Run the full source build pipeline for a given source type."""
 
     def __init__(
@@ -32,14 +29,14 @@ class RunSourcePipelineTask(Task):
         self.repo_str = repo
         self.dir_path = dir_path
         self.source_type = source_type
-        super(RunSourcePipelineTask, self).__init__(*args, **kwargs)
+        super(GenerateSourceTask, self).__init__(*args, **kwargs)
 
     @staticmethod
     def get_cache_root() -> str:
         return read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
 
-    def build_context(self, source_type: str) -> SourcePipelineContext:
-        return SourcePipelineContext(
+    def build_context(self, source_type: str) -> SourceBuildContext:
+        return SourceBuildContext(
             source_type=source_type,
             dir_path=f"{self.dir_path}/{'book' if source_type == 'booksource' else 'rss'}",
             repo=self.repo_str,
@@ -60,9 +57,9 @@ class RunSourcePipelineTask(Task):
         context = runtime["context"]
         store = runtime["store"]
 
-        FetchSourceDataTask(store=store).run()
-        BackupSourceDataTask(store=store).run()
-        RestoreSourceDataTask(store=store).run()
+        LoadSourceBackupTask(store=store).run()
+        DownloadSourceDataTask(store=store).run()
+        DumpSourceBackupTask(store=store).run()
         UploadSourceBatchesTask(store=store, remote_manager=context.remote_manager).run()
         PublishSourceReportTask(
             report_builder=context.report_builder,

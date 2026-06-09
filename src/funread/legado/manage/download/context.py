@@ -1,16 +1,16 @@
-"""Runtime context for the source pipeline."""
+"""Runtime context for source download tasks."""
 
 from typing import Any, Dict, List
 
 from fundrive.drives.github import GithubDrive
 
-from ..core.constants import DEFAULT_REPO, INITIAL_COUNTER, MIN_UPLOAD_BATCH_SIZE
-from ..reporting import SourceRemoteManager, SourceReportBuilder
-from ..sources import SourceStoreFactory
+from .core.constants import DEFAULT_REPO, INITIAL_COUNTER, MIN_UPLOAD_BATCH_SIZE
+from .reporting import SourceRemoteManager, SourceReportBuilder
+from .sources import SourceStoreFactory
 
 
-class SourcePipelineContext:
-    """Shared runtime context for source pipeline tasks."""
+class SourceBuildContext:
+    """Shared runtime context for source generation tasks."""
 
     def __init__(
         self,

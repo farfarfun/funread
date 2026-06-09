@@ -3,13 +3,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from funread.legado.manage.download import RunSourcePipelineTask
+from funread.legado.manage.download import GenerateSourceTask
 from funread.legado.manage.publish import UpdateRssTask
 from funread.legado.manage.source import MergeSourceTask
 
 
 def run_generate():
-    task = RunSourcePipelineTask()
+    task = GenerateSourceTask()
     task.run_book()
     task.run_rss()
 

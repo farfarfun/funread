@@ -9,12 +9,21 @@ from typing import Any, Dict, Iterator, List, Optional
 from nltfile import funos
 from nltfile.compress import tarfile
 from nltlog import getLogger
+from nlttask import Task
 from tqdm import tqdm
 
 from .constants import DEFAULT_BACKUP_ID
 
 
 logger = getLogger("funread")
+
+
+class SourceStoreTask(Task):
+    """Base class for tasks that operate on a local source store."""
+
+    def __init__(self, store: Optional["LocalSourceStore"] = None, *args, **kwargs):
+        self.store = store
+        super(SourceStoreTask, self).__init__(*args, **kwargs)
 
 
 class LocalSourceStore:
@@ -27,9 +36,7 @@ class LocalSourceStore:
         self.path_bak = str(base_path / "bak")
         self.path_pkl = str(base_path / "pkl")
         self.path_bok = str(base_path / "source")
-        self.pkl_url = str(Path(self.path_pkl) / "url_info.json")
         self.database_url = kwargs.get("database_url")
-        self.pkl_md5 = str(Path(self.path_pkl) / "source_info.json")
 
         self.url_map: Dict[str, int] = {}
         self.md5_set: Dict[str, Dict[str, Any]] = {}
@@ -72,12 +79,6 @@ class LocalSourceStore:
             raise
 
     @staticmethod
-    def _extract_persisted_items(data: Any) -> Any:
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        return data
-
-    @staticmethod
     def _coerce_int(value: Any) -> Optional[int]:
         if isinstance(value, bool):
             return None
@@ -96,37 +97,6 @@ class LocalSourceStore:
         if isinstance(value, (list, tuple)) and len(value) == 1:
             return LocalSourceStore._coerce_int(value[0])
         return None
-
-    @classmethod
-    def _normalize_url_map(cls, data: Any) -> Dict[str, int]:
-        normalized: Dict[str, int] = {}
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict) and isinstance(data.get("url"), list):
-            url_ids = data.get("url_id", [])
-            if not isinstance(url_ids, list):
-                raise ValueError("Invalid URL map data: url_id must be a list")
-            items = [{"url": url, "url_id": url_id} for url, url_id in zip(data["url"], url_ids)]
-        elif isinstance(data, dict):
-            items = [{"url": url, "url_id": url_id} for url, url_id in data.items()]
-        else:
-            raise ValueError(f"Unsupported URL map data type: {type(data).__name__}")
-
-        for item in items:
-            if not isinstance(item, dict):
-                logger.warning(f"Skipping invalid URL map item: {item!r}")
-                continue
-            url = item.get("url")
-            url_id = cls._coerce_int(item.get("url_id"))
-            if not isinstance(url, str) or not url:
-                logger.warning(f"Skipping URL map item with invalid url: {item!r}")
-                continue
-            if url_id is None:
-                logger.warning(f"Skipping URL map item with invalid url_id: {item!r}")
-                continue
-            normalized[url] = url_id
-
-        return normalized
 
     def get_source_url_key(self) -> str:
         return "sourceUrl"
@@ -237,22 +207,16 @@ class LocalSourceStore:
 
         self.current_id = max(self.url_map.values()) if self.url_map else DEFAULT_BACKUP_ID - 1
 
-        if os.path.exists(self.pkl_md5):
-            try:
-                data = self._extract_persisted_items(self._load_json_safely(self.pkl_md5))
-                if isinstance(data, list):
-                    self.md5_set = {item["md5"]: item for item in data}
-                elif isinstance(data, dict):
-                    self.md5_set = data
-                else:
-                    raise ValueError(f"Unsupported MD5 index data type: {type(data).__name__}")
-            except (IOError, json.JSONDecodeError):
-                logger.warning("Failed to load MD5 index, starting fresh")
-                self.md5_set = {}
-            except (KeyError, TypeError, ValueError) as e:
-                logger.warning(f"Invalid MD5 index data, starting fresh: {e}")
-                self.md5_set = {}
-        else:
+        try:
+            from funread.legado.manage import load_source_index_map
+
+            self.md5_set = load_source_index_map(
+                source_type=self.cate1, database_url=self.database_url
+            )
+        except ValueError:
+            self.md5_set = {}
+        except Exception as e:
+            logger.warning(f"Failed to load source index from database: {e}")
             self.md5_set = {}
 
     def dumps(self) -> None:
@@ -260,9 +224,18 @@ class LocalSourceStore:
         self._ensure_directories()
         try:
             if self.md5_set:
-                self._save_json_safely(self.pkl_md5, {"data": list(self.md5_set.values())})
+                from funread.legado.manage import upsert_source_index_records
+
+                upsert_source_index_records(
+                    records=list(self.md5_set.values()),
+                    source_type=self.cate1,
+                    database_url=self.database_url,
+                )
         except IOError as e:
             logger.error(f"Failed to save data: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to save source index: {e}")
             raise
 
     def loads_zip(self, zip_file: Optional[str] = None) -> None:
@@ -325,3 +298,53 @@ class LocalSourceStore:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.dumps()
+
+
+class DownloadSourceDataTask(SourceStoreTask):
+    """Download source lists and merge them into local storage."""
+
+    def run(self) -> None:
+        if self.store is None:
+            raise ValueError("store is required for DownloadSourceDataTask")
+        try:
+            with self.store as runner:
+                runner.loader()
+                logger.info("Source data loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load source data: {e}")
+            raise
+
+
+class DumpSourceBackupTask(SourceStoreTask):
+    """Persist local source data and write a backup archive."""
+
+    def run(self) -> str:
+        if self.store is None:
+            raise ValueError("store is required for DumpSourceBackupTask")
+        try:
+            with self.store as runner:
+                zip_path = runner.dumps_zip()
+                logger.info(f"Source data compressed successfully: {zip_path}")
+                return zip_path
+        except Exception as e:
+            logger.error(f"Failed to compress source data: {e}")
+            raise
+
+
+class LoadSourceBackupTask(SourceStoreTask):
+    """Load local source data from the latest or a given backup archive."""
+
+    def __init__(self, store=None, zip_file: Optional[str] = None, *args, **kwargs):
+        self.zip_file = zip_file
+        super(LoadSourceBackupTask, self).__init__(store=store, *args, **kwargs)
+
+    def run(self) -> None:
+        if self.store is None:
+            raise ValueError("store is required for LoadSourceBackupTask")
+        try:
+            with self.store as runner:
+                runner.loads_zip(zip_file=self.zip_file)
+                logger.info("Source data restored successfully")
+        except Exception as e:
+            logger.error(f"Failed to restore source data: {e}")
+            raise

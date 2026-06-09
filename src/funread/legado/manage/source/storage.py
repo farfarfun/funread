@@ -52,6 +52,22 @@ class SourceDetailRecord(Base):
     )
 
 
+class SourceIndexRecord(Base):
+    """Persisted source-content index metadata keyed by md5."""
+
+    __tablename__ = "source_index_records"
+
+    md5: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    url_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    cate1: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 _ENGINE_CACHE: Dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: Dict[str, sessionmaker] = {}
 _INITIALIZED_DATABASES = set()
@@ -205,6 +221,88 @@ def list_source_detail_records(
         if source_type:
             stmt = stmt.where(SourceDetailRecord.source_type == source_type)
         return session.execute(stmt.order_by(SourceDetailRecord.id)).scalars().all()
+
+
+def load_source_index_map(
+    source_type: Optional[str] = None,
+    database_url: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Load md5 index metadata from source-index records."""
+    init_source_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        stmt = select(SourceIndexRecord)
+        if source_type:
+            stmt = stmt.where(SourceIndexRecord.source_type == source_type)
+        records = session.execute(stmt).scalars().all()
+
+    return {
+        record.md5: {
+            "md5": record.md5,
+            "source_type": record.source_type,
+            "url_id": record.url_id,
+            "hostname": record.hostname,
+            "cate1": record.cate1,
+        }
+        for record in records
+    }
+
+
+def upsert_source_index_records(
+    records: List[Dict[str, Any]],
+    source_type: str,
+    database_url: Optional[str] = None,
+) -> None:
+    """Bulk upsert source-content index metadata."""
+    if not source_type:
+        raise ValueError("source_type is required")
+    if not records:
+        return
+
+    init_source_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+    md5_list = [str(record["md5"]) for record in records if record.get("md5")]
+    if not md5_list:
+        return
+
+    with session_factory() as session:
+        existing_records = {
+            record.md5: record
+            for record in session.execute(
+                select(SourceIndexRecord).where(SourceIndexRecord.md5.in_(md5_list))
+            )
+            .scalars()
+            .all()
+        }
+
+        for payload in records:
+            md5 = str(payload.get("md5") or "")
+            hostname = str(payload.get("hostname") or "")
+            url_id = payload.get("url_id")
+            cate1 = payload.get("cate1")
+            if not md5 or not hostname or url_id is None or cate1 is None:
+                continue
+
+            record = existing_records.get(md5)
+            if record is None:
+                session.add(
+                    SourceIndexRecord(
+                        md5=md5,
+                        source_type=source_type,
+                        url_id=int(url_id),
+                        hostname=hostname,
+                        cate1=int(cate1),
+                    )
+                )
+                continue
+
+            record.source_type = source_type
+            record.url_id = int(url_id)
+            record.hostname = hostname
+            record.cate1 = int(cate1)
+
+        session.commit()
 
 
 def load_source_detail_url_map(

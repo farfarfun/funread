@@ -1,20 +1,20 @@
 from pathlib import Path
 
-import funread.legado.manage.download.pipeline.task as pipeline_task_module
 import funread.legado.manage.download.reporting.remote as remote_module
 import funread.legado.manage.download.sources.book as book_module
 import funread.legado.manage.download.sources.rss as rss_module
+import funread.legado.manage.download.task as generate_task_module
 
 from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
-from funread.legado.manage.download.pipeline import (
-    BackupSourceDataTask,
-    FetchSourceDataTask,
+from funread.legado.manage.download import (
+    DownloadSourceDataTask,
+    DumpSourceBackupTask,
+    GenerateSourceTask,
+    LoadSourceBackupTask,
     PublishSourceReportTask,
-    RestoreSourceDataTask,
-    RunSourcePipelineTask,
     UploadSourceBatchesTask,
 )
-from funread.legado.manage.download.pipeline.context import SourcePipelineContext
+from funread.legado.manage.download.context import SourceBuildContext
 from funread.legado.manage.download.sources.book import BookSourceProcessor
 from funread.legado.manage.source import SourceMergeRunner, add_source_detail_url
 import funread.legado.manage.source.merge.task as merge_module
@@ -130,7 +130,7 @@ class _FakeDrive:
 
 
 def test_upload_batch_splits_large_payloads() -> None:
-    context = SourcePipelineContext.__new__(SourcePipelineContext)
+    context = SourceBuildContext.__new__(SourceBuildContext)
     context.dir_path = "funread/legado/snapshot/lasted/book"
     context.drive = _FakeDrive(fail_threshold=2)
     context._source_count_cache = {}
@@ -150,7 +150,7 @@ def test_upload_batch_splits_large_payloads() -> None:
 
 
 def test_upload_batch_increments_counter_on_success() -> None:
-    context = SourcePipelineContext.__new__(SourcePipelineContext)
+    context = SourceBuildContext.__new__(SourceBuildContext)
     context.dir_path = "funread/legado/snapshot/lasted/book"
     context.drive = _FakeDrive()
     context._source_count_cache = {}
@@ -164,26 +164,26 @@ def test_upload_batch_increments_counter_on_success() -> None:
     assert context.drive.calls == [("progress-1000.json", 2)]
 
 
-def test_source_pipeline_context_formats_size_and_counts_sources() -> None:
-    context = SourcePipelineContext.__new__(SourcePipelineContext)
+def test_source_build_context_formats_size_and_counts_sources() -> None:
+    context = SourceBuildContext.__new__(SourceBuildContext)
     context._source_count_cache = {}
 
-    assert SourcePipelineContext.format_file_size(context, 512) == "512 B"
-    assert SourcePipelineContext.format_file_size(context, 1536) == "1.5 KB"
-    assert SourcePipelineContext.format_file_size(context, 1024 * 1024) == "1.0 MB"
+    assert SourceBuildContext.format_file_size(context, 512) == "512 B"
+    assert SourceBuildContext.format_file_size(context, 1536) == "1.5 KB"
+    assert SourceBuildContext.format_file_size(context, 1024 * 1024) == "1.0 MB"
     assert (
-        SourcePipelineContext.extract_source_count(context, {"fid": "a/b.json", "name": "b.json"})
+        SourceBuildContext.extract_source_count(context, {"fid": "a/b.json", "name": "b.json"})
         == "-"
     )
     context._remember_source_count("a/b.json", "b.json", count=3)
     assert (
-        SourcePipelineContext.extract_source_count(context, {"fid": "a/b.json", "name": "b.json"})
+        SourceBuildContext.extract_source_count(context, {"fid": "a/b.json", "name": "b.json"})
         == "3"
     )
 
 
 def test_upload_single_batch_caches_source_count() -> None:
-    context = SourcePipelineContext.__new__(SourcePipelineContext)
+    context = SourceBuildContext.__new__(SourceBuildContext)
     context.dir_path = "funread/legado/snapshot/lasted/book"
     context._source_count_cache = {}
     context.drive = _FakeDrive()
@@ -194,7 +194,7 @@ def test_upload_single_batch_caches_source_count() -> None:
     manager.upload_single_batch([{"i": 1}, {"i": 2}], 1000)
 
     assert (
-        SourcePipelineContext.extract_source_count(
+        SourceBuildContext.extract_source_count(
             context,
             {
                 "fid": "funread/legado/snapshot/lasted/book/progress-1000.json",
@@ -246,9 +246,9 @@ def test_source_step_tasks_delegate_to_generator() -> None:
     remote_manager = _RemoteManager()
     report_builder = _ReportBuilder()
 
-    FetchSourceDataTask(store=store).run()
-    assert BackupSourceDataTask(store=store).run() == "backup.tar.xz"
-    RestoreSourceDataTask(store=store, zip_file="a.tar.xz").run()
+    DownloadSourceDataTask(store=store).run()
+    assert DumpSourceBackupTask(store=store).run() == "backup.tar.xz"
+    LoadSourceBackupTask(store=store, zip_file="a.tar.xz").run()
     UploadSourceBatchesTask(store=store, remote_manager=remote_manager).run()
     PublishSourceReportTask(report_builder=report_builder, remote_manager=remote_manager).run()
 
@@ -270,7 +270,7 @@ def test_source_step_tasks_delegate_to_generator() -> None:
     ]
 
 
-def test_run_source_pipeline_task_runs_pipeline_in_order(monkeypatch) -> None:
+def test_generate_source_task_runs_in_order(monkeypatch) -> None:
     calls = []
 
     class _Store:
@@ -292,12 +292,12 @@ def test_run_source_pipeline_task_runs_pipeline_in_order(monkeypatch) -> None:
             return _Store()
 
     monkeypatch.setattr(
-        RunSourcePipelineTask,
+        GenerateSourceTask,
         "get_cache_root",
         staticmethod(lambda: "/tmp/cache"),
     )
     monkeypatch.setattr(
-        RunSourcePipelineTask,
+        GenerateSourceTask,
         "build_context",
         lambda self, source_type: _Context(),
     )
@@ -329,26 +329,26 @@ def test_run_source_pipeline_task_runs_pipeline_in_order(monkeypatch) -> None:
     class _Rss(_BaseStep):
         step_name = "rss"
 
-    monkeypatch.setattr(pipeline_task_module, "FetchSourceDataTask", _Download)
-    monkeypatch.setattr(pipeline_task_module, "BackupSourceDataTask", _Compress)
-    monkeypatch.setattr(pipeline_task_module, "RestoreSourceDataTask", _Extract)
-    monkeypatch.setattr(pipeline_task_module, "UploadSourceBatchesTask", _Upload)
-    monkeypatch.setattr(pipeline_task_module, "PublishSourceReportTask", _Rss)
+    monkeypatch.setattr(generate_task_module, "LoadSourceBackupTask", _Extract)
+    monkeypatch.setattr(generate_task_module, "DownloadSourceDataTask", _Download)
+    monkeypatch.setattr(generate_task_module, "DumpSourceBackupTask", _Compress)
+    monkeypatch.setattr(generate_task_module, "UploadSourceBatchesTask", _Upload)
+    monkeypatch.setattr(generate_task_module, "PublishSourceReportTask", _Rss)
 
-    RunSourcePipelineTask().run_book()
+    GenerateSourceTask().run_book()
 
     assert calls == [
         ("create_store", "/tmp/cache"),
+        ("extract", "_Store"),
         ("download", "_Store"),
         ("compress", "_Store"),
-        ("extract", "_Store"),
         ("upload", "_Store"),
         ("rss", "_ReportBuilder"),
     ]
 
 
 def test_cleanup_stale_remote_batches_deletes_higher_counters() -> None:
-    context = SourcePipelineContext.__new__(SourcePipelineContext)
+    context = SourceBuildContext.__new__(SourceBuildContext)
     context.dir_path = "funread/legado/snapshot/lasted/book"
 
     class _File:

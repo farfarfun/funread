@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from funread.legado.manage.download import RunSourcePipelineTask
+from funread.legado.manage.download import GenerateSourceTask
 from funread.legado.manage.publish import UpdateEntrance
 
 from tqdm import tqdm
@@ -44,6 +44,6 @@ def add_url_data():
 
 # add_url_data()
 
-RunSourcePipelineTask().run_book()
-RunSourcePipelineTask().run_rss()
+GenerateSourceTask().run_book()
+GenerateSourceTask().run_rss()
 UpdateEntrance().run()

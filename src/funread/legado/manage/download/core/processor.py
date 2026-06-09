@@ -92,6 +92,7 @@ class SourceProcessor(LocalSourceStore):
             self.add_source_to_candidate(md5, fpath, source, url_info=url_info)
             self.md5_set[md5] = {
                 "md5": md5,
+                "source_type": self.cate1,
                 "url_id": url_id,
                 "hostname": hostname,
                 "cate1": cate1,
