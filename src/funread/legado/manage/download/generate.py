@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import json
+import tempfile
 from dominate.tags import *
 from fundrive.drives.github import GithubDrive
 from nltfile import funos
@@ -153,6 +154,7 @@ class GenerateSourceType:
         self.dir_path = dir_path
         self.source_type = source_type
         self.drive = GithubDrive()
+        self._source_count_cache: Dict[str, str] = {}
         self.drive.login(
             repo_owner=self.repo_str.split("/")[0],
             repo_name=self.repo_str.split("/")[1],
@@ -164,7 +166,6 @@ class GenerateSourceType:
         if self.source_type == "booksource":
             return BookSourceDownload(path=path, cate1="book")
         return RSSSourceDownload(path=path, cate1="rss")
-
 
     @staticmethod
     def format_file_size(size: Any) -> str:
@@ -183,18 +184,39 @@ class GenerateSourceType:
             return f"{int(value)} {units[unit_index]}"
         return f"{value:.1f} {units[unit_index]}"
 
-    @staticmethod
-    def extract_source_count(file: Dict[str, Any]) -> str:
-        """根据文件内容估算该批次包含的源数量"""
+    def extract_source_count(self, file: Dict[str, Any]) -> str:
+        """读取远端 JSON 文件并统计该批次源数量"""
+        fid = str(file.get("fid", ""))
         name = str(file.get("name", ""))
-        if name == "index.html":
+        if not fid or not name.endswith(".json"):
             return "-"
+        if fid in self._source_count_cache:
+            return self._source_count_cache[fid]
 
-        size = file.get("size")
+        temp_path = None
         try:
-            return str(int(size)) if name.endswith(".json") and int(size) < 1024 else "-"
-        except (TypeError, ValueError):
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                temp_path = tmp.name
+            if not self.drive.download_file(fid=fid, filepath=temp_path, overwrite=True):
+                self._source_count_cache[fid] = "-"
+                return "-"
+            with open(temp_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                count = str(len(data))
+            elif isinstance(data, dict) and isinstance(data.get("list"), list):
+                count = str(len(data["list"]))
+            else:
+                count = "-"
+            self._source_count_cache[fid] = count
+            return count
+        except Exception as e:
+            logger.warning(f"Failed to extract source count for {fid}: {e}")
+            self._source_count_cache[fid] = "-"
             return "-"
+        finally:
+            if temp_path and Path(temp_path).exists():
+                funos.delete(temp_path)
 
     def set_table_head(self) -> None:
         """设置表格头"""

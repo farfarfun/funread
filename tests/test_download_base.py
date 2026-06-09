@@ -143,3 +143,20 @@ def test_upload_batch_increments_counter_on_success() -> None:
 
     assert next_counter == 1001
     assert generator.drive.calls == [("progress-1000.json", 2)]
+
+
+def test_generate_source_type_formats_size_and_counts_sources(tmp_path: Path) -> None:
+    generator = generate_module.GenerateSourceType.__new__(generate_module.GenerateSourceType)
+    generator._source_count_cache = {}
+
+    class _Drive:
+        def download_file(self, fid, filepath, overwrite):
+            Path(filepath).write_text('[{"id": 1}, {"id": 2}, {"id": 3}]', encoding="utf-8")
+            return True
+
+    generator.drive = _Drive()
+
+    assert generator.format_file_size(512) == "512 B"
+    assert generator.format_file_size(1536) == "1.5 KB"
+    assert generator.format_file_size(1024 * 1024) == "1.0 MB"
+    assert generator.extract_source_count({"fid": "a/b.json", "name": "b.json"}) == "3"
