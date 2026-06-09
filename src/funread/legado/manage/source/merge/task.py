@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Protocol
 
 import requests
@@ -21,7 +22,11 @@ logger = getLogger("funread")
 
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
-DEFAULT_LLM_TIMEOUT = 120
+DEFAULT_LLM_TIMEOUT = 600
+DEFAULT_MAX_VERSIONS_PER_MERGE = 8
+DEFAULT_MAX_PROMPT_CHARS = 50000
+DEFAULT_LLM_MAX_RETRIES = 3
+DEFAULT_LLM_RETRY_SLEEP_SECONDS = 2
 
 
 class SourceMerger(Protocol):
@@ -43,22 +48,21 @@ class OpenAICompatibleSourceMerger:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout: int = DEFAULT_LLM_TIMEOUT,
+        max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        retry_sleep_seconds: int = DEFAULT_LLM_RETRY_SLEEP_SECONDS,
     ):
-        self.api_key = api_key or read_secret(
-            cate1="funread", cate2="cache", cate3="source", cate4="merge_api_key"
+        self.base_url = base_url or read_secret(
+            cate1="funread", cate2="source", cate3="merge", cate4="base_url"
         )
-        self.base_url = (
-            base_url or self._read_optional_secret("merge_base_url") or DEFAULT_LLM_BASE_URL
-        ).rstrip("/")
-        self.model = model or self._read_optional_secret("merge_model") or DEFAULT_LLM_MODEL
+        self.api_key = api_key or read_secret(
+            cate1="funread", cate2="source", cate3="merge", cate4="api_key"
+        )
+        self.model = model or read_secret(
+            cate1="funread", cate2="source", cate3="merge", cate4="model"
+        )
         self.timeout = timeout
-
-    @staticmethod
-    def _read_optional_secret(cate4: str) -> Optional[str]:
-        try:
-            return read_secret(cate1="funread", cate2="cache", cate3="source", cate4=cate4)
-        except Exception:
-            return None
+        self.max_retries = max(1, max_retries)
+        self.retry_sleep_seconds = max(0, retry_sleep_seconds)
 
     @staticmethod
     def _extract_json_object(content: str) -> Dict[str, Any]:
@@ -75,18 +79,140 @@ class OpenAICompatibleSourceMerger:
 
     @staticmethod
     def _build_prompt(source_type: str, hostname: str, versions: List[Dict[str, Any]]) -> str:
+        versions_json = json.dumps(versions, ensure_ascii=False, separators=(",", ":"))
         return (
             "你是一个阅读源合并器。"
             "请把同一个站点的多个版本阅读源合并成一个最优版本。"
-            "输出必须是一个 JSON 对象，不要输出解释，不要输出 markdown。"
+            "输出必须是合并后的单个源对象本身，必须是紧凑 JSON。"
+            "不要输出解释，不要输出 markdown，不要输出数组，不要输出外层包装对象。"
             "要求：\n"
             "1. 保留同一含义下信息更完整、更具体的字段。\n"
             "2. 不要引入原始数据中不存在的新站点 URL。\n"
             "3. 保留能工作的规则，删除明显为空、重复或冲突的内容。\n"
             "4. 返回结果必须仍然属于同一 hostname。\n"
-            f"5. source_type={source_type}, hostname={hostname}\n"
-            f"原始版本如下：\n{json.dumps(versions, ensure_ascii=False, indent=2)}"
+            "5. 只返回最终合并后的源对象字段，不要返回 bookSources、rssSources、source、data 等包装层。\n"
+            f"6. source_type={source_type}, hostname={hostname}\n"
+            f"原始版本如下：\n{versions_json}"
         )
+
+    @staticmethod
+    def _extract_stream_delta(payload: Dict[str, Any]) -> Dict[str, str]:
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return {}
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return {}
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            reasoning = delta.get("reasoning_content")
+            content = delta.get("content")
+            result: Dict[str, str] = {}
+            if isinstance(reasoning, str):
+                result["reasoning"] = reasoning
+            if isinstance(content, str):
+                result["content"] = content
+            if result:
+                return result
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                return {"content": content}
+        return {}
+
+    def _post_and_collect_content(self, payload: Dict[str, Any]) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.base_url}/chat/completions"
+        request_started_at = time.time()
+        logger.info(
+            "Start LLM merge request: "
+            f"model={self.model}, versions_payload_chars={len(json.dumps(payload, ensure_ascii=False))}"
+        )
+        with requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+            stream=bool(payload.get("stream")),
+        ) as response:
+            logger.info(
+                "LLM merge response headers received: "
+                f"status={response.status_code}, elapsed={time.time() - request_started_at:.2f}s"
+            )
+            response.raise_for_status()
+            if not payload.get("stream"):
+                try:
+                    result = response.json()
+                except Exception:
+                    return response.text
+                choices = result.get("choices", [])
+                if choices and isinstance(choices[0], dict):
+                    message = choices[0].get("message", {})
+                    if isinstance(message, dict):
+                        content = message.get("content")
+                        if isinstance(content, str):
+                            logger.info(
+                                "LLM merge request finished: "
+                                f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(content)}"
+                            )
+                            return content
+                text = response.text
+                logger.info(
+                    "LLM merge request finished with raw text: "
+                    f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(text)}"
+                )
+                return text
+
+            content_fragments: List[str] = []
+            reasoning_chars = 0
+            event_count = 0
+            first_chunk_logged = False
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                event_count += 1
+                try:
+                    event_payload = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid LLM stream payload: {data[:200]}")
+                    continue
+                delta = self._extract_stream_delta(event_payload)
+                reasoning_piece = delta.get("reasoning", "")
+                content_piece = delta.get("content", "")
+                if reasoning_piece:
+                    reasoning_chars += len(reasoning_piece)
+                if content_piece:
+                    content_fragments.append(content_piece)
+                    if not first_chunk_logged:
+                        logger.info(
+                            "LLM merge first stream chunk received: "
+                            f"elapsed={time.time() - request_started_at:.2f}s, chunk_chars={len(content_piece)}"
+                        )
+                        first_chunk_logged = True
+                    elif event_count % 20 == 0:
+                        logger.info(
+                            "LLM merge stream progress: "
+                            f"elapsed={time.time() - request_started_at:.2f}s, "
+                            f"events={event_count}, reasoning_chars={reasoning_chars}, "
+                            f"content_chars={sum(len(item) for item in content_fragments)}"
+                        )
+            content = "".join(content_fragments)
+            logger.info(
+                "LLM merge stream finished: "
+                f"elapsed={time.time() - request_started_at:.2f}s, "
+                f"events={event_count}, reasoning_chars={reasoning_chars}, content_chars={len(content)}"
+            )
+            return content
 
     def merge_sources(
         self,
@@ -99,8 +225,9 @@ class OpenAICompatibleSourceMerger:
         payload = {
             "model": self.model,
             "temperature": 0,
+            "stream": True,
             "messages": [
-                {"role": "system", "content": "你只返回一个合法 JSON 对象。"},
+                {"role": "system", "content": "你只返回一个合法、紧凑、无包装层的 JSON 对象。"},
                 {
                     "role": "user",
                     "content": self._build_prompt(source_type, hostname, versions),
@@ -108,30 +235,44 @@ class OpenAICompatibleSourceMerger:
             ],
             "response_format": {"type": "json_object"},
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                try:
+                    content = self._post_and_collect_content(payload=payload)
+                except requests.HTTPError as error:
+                    if error.response is None or error.response.status_code != 400:
+                        raise
+                    payload_without_response_format = dict(payload)
+                    payload_without_response_format.pop("response_format", None)
+                    logger.warning(
+                        "Retry LLM merge request without response_format: "
+                        f"attempt={attempt}/{self.max_retries}, hostname={hostname}"
+                    )
+                    content = self._post_and_collect_content(
+                        payload=payload_without_response_format
+                    )
+                if not isinstance(content, str):
+                    raise ValueError("LLM response content is not text")
+                merged_source = self._extract_json_object(content)
+                logger.info(
+                    "LLM merge request parsed successfully: "
+                    f"attempt={attempt}/{self.max_retries}, hostname={hostname}"
+                )
+                return merged_source
+            except (requests.RequestException, ValueError, json.JSONDecodeError) as error:
+                last_error = error
+                logger.warning(
+                    "LLM merge request failed: "
+                    f"attempt={attempt}/{self.max_retries}, hostname={hostname}, error={error}"
+                )
+                if attempt >= self.max_retries:
+                    break
+                if self.retry_sleep_seconds > 0:
+                    time.sleep(self.retry_sleep_seconds)
+        raise ValueError(
+            f"LLM merge failed after {self.max_retries} attempts for hostname={hostname}: {last_error}"
         )
-        if response.status_code == 400:
-            payload.pop("response_format", None)
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-        response.raise_for_status()
-        result = response.json()
-        content = result["choices"][0]["message"]["content"]
-        if not isinstance(content, str):
-            raise ValueError("LLM response content is not text")
-        return self._extract_json_object(content)
 
 
 class SourceMergeRunner:
@@ -142,10 +283,14 @@ class SourceMergeRunner:
         store: SourceProcessor,
         merger: Optional[SourceMerger] = None,
         min_versions: int = 2,
+        max_versions_per_merge: int = DEFAULT_MAX_VERSIONS_PER_MERGE,
+        max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
     ):
         self.store = store
         self.merger = merger or OpenAICompatibleSourceMerger()
         self.min_versions = min_versions
+        self.max_versions_per_merge = max_versions_per_merge
+        self.max_prompt_chars = max_prompt_chars
 
     def run(self, limit: Optional[int] = None) -> Dict[str, int]:
         stats = {"processed": 0, "merged": 0, "skipped": 0, "failed": 0}
@@ -153,33 +298,39 @@ class SourceMergeRunner:
             if limit is not None and stats["processed"] >= limit:
                 break
             stats["processed"] += 1
+            logger.info(f"Start merge source file: {file_path}")
             status = self.merge_file(file_path)
             stats[status] += 1
         return stats
 
     def iter_source_files(self) -> List[str]:
-        file_list: List[str] = []
+        file_list: List[tuple[int, str]] = []
         if not os.path.exists(self.store.path_bok):
-            return file_list
+            return []
         for root, _, files in os.walk(self.store.path_bok):
             for name in files:
                 if name.endswith(".json"):
-                    file_list.append(os.path.join(root, name))
-        file_list.sort()
-        return file_list
+                    file_path = os.path.join(root, name)
+                    file_list.append((self._read_version_count(file_path), file_path))
+        file_list.sort(key=lambda item: (-item[0], item[1]))
+        return [file_path for _, file_path in file_list]
 
     def merge_file(self, file_path: str) -> str:
         try:
             data = self.store._load_json_safely(file_path)
             versions = self._collect_versions(data)
             if len(versions) < self.min_versions:
+                logger.info(
+                    f"Skip merge source file: file={file_path}, versions={len(versions)}, "
+                    f"min_versions={self.min_versions}"
+                )
                 return "skipped"
             hostname = str(data.get("hostname") or "")
-            merged_source = self.merger.merge_sources(
-                source_type=self.store.cate1,
-                hostname=hostname,
-                versions=versions,
+            logger.info(
+                "Prepare merge source file: "
+                f"file={file_path}, hostname={hostname}, versions={len(versions)}"
             )
+            merged_source = self._merge_versions_progressively(hostname=hostname, versions=versions)
             validated_source = self._validate_merged_source(
                 source=merged_source,
                 expected_hostname=hostname,
@@ -188,7 +339,10 @@ class SourceMergeRunner:
             data["merged"] = [{"md5_list": merged_md5_list, "source": validated_source}]
             data["candidate"] = []
             self.store._save_json_safely(file_path, data)
-            logger.info(f"Merged source file: {file_path}")
+            logger.info(
+                "Merged source successfully: "
+                f"file={file_path}, hostname={hostname}, versions={len(versions)}"
+            )
             return "merged"
         except Exception as e:
             logger.warning(f"Failed to merge source file {file_path}: {e}")
@@ -205,6 +359,86 @@ class SourceMergeRunner:
                 if isinstance(source, dict):
                     versions.append(copy.deepcopy(source))
         return versions
+
+    def _read_version_count(self, file_path: str) -> int:
+        try:
+            data = self.store._load_json_safely(file_path)
+        except Exception:
+            return 0
+        return len(self._collect_versions(data))
+
+    def _estimate_versions_size(self, versions: List[Dict[str, Any]]) -> int:
+        return len(json.dumps(versions, ensure_ascii=False))
+
+    def _split_versions(self, versions: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        chunks: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        current_size = 0
+        for version in versions:
+            version_size = len(json.dumps(version, ensure_ascii=False))
+            exceeds_count = len(current) >= self.max_versions_per_merge
+            exceeds_size = current and current_size + version_size > self.max_prompt_chars
+            if exceeds_count or exceeds_size:
+                chunks.append(current)
+                current = []
+                current_size = 0
+            current.append(version)
+            current_size += version_size
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _merge_versions_progressively(
+        self, hostname: str, versions: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        if len(versions) < self.min_versions:
+            raise ValueError("Not enough versions to merge")
+
+        if (
+            len(versions) <= self.max_versions_per_merge
+            and self._estimate_versions_size(versions) <= self.max_prompt_chars
+        ):
+            logger.info(
+                "Merge source chunk directly: "
+                f"hostname={hostname}, versions={len(versions)}, "
+                f"chars={self._estimate_versions_size(versions)}"
+            )
+            return self.merger.merge_sources(
+                source_type=self.store.cate1,
+                hostname=hostname,
+                versions=versions,
+            )
+
+        chunks = self._split_versions(versions)
+        logger.info(
+            "Split merge source into chunks: "
+            f"hostname={hostname}, versions={len(versions)}, chunks={len(chunks)}"
+        )
+        merged_chunks: List[Dict[str, Any]] = []
+        for index, chunk in enumerate(chunks, start=1):
+            if len(chunk) == 1:
+                logger.info(
+                    "Skip LLM merge for single-version chunk: "
+                    f"hostname={hostname}, chunk={index}/{len(chunks)}"
+                )
+                merged_chunks.append(copy.deepcopy(chunk[0]))
+                continue
+            logger.info(
+                "Merge source chunk: "
+                f"hostname={hostname}, chunk={index}/{len(chunks)}, "
+                f"versions={len(chunk)}, chars={self._estimate_versions_size(chunk)}"
+            )
+            merged_chunks.append(
+                self.merger.merge_sources(
+                    source_type=self.store.cate1,
+                    hostname=hostname,
+                    versions=chunk,
+                )
+            )
+
+        if len(merged_chunks) == 1:
+            return merged_chunks[0]
+        return self._merge_versions_progressively(hostname=hostname, versions=merged_chunks)
 
     def _build_merged_md5_list(
         self, data: Dict[str, Any], merged_source: Dict[str, Any]

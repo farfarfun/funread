@@ -4,6 +4,7 @@ import funread.legado.manage.download.reporting.remote as remote_module
 import funread.legado.manage.download.sources.book as book_module
 import funread.legado.manage.download.sources.rss as rss_module
 import funread.legado.manage.download.task as generate_task_module
+import funread.legado.manage.source.merge.task as merge_module
 
 from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
 from funread.legado.manage.download import (
@@ -16,8 +17,14 @@ from funread.legado.manage.download import (
 )
 from funread.legado.manage.download.context import SourceBuildContext
 from funread.legado.manage.download.sources.book import BookSourceProcessor
-from funread.legado.manage.source import SourceMergeRunner, add_source_detail_url
-import funread.legado.manage.source.merge.task as merge_module
+from funread.legado.manage.source import (
+    SourceMergeRunner,
+    SyncLocalSourceRecordsTask,
+    add_source_detail_url,
+    list_source_detail_records,
+    load_source_index_map,
+    upsert_source_index_records,
+)
 
 
 class DummySourceProcessor(SourceProcessor):
@@ -68,6 +75,40 @@ def test_book_source_download_accepts_book_source_url(tmp_path: Path) -> None:
     assert added is True
     exported = next(source.export_sources(size=10))
     assert exported[0]["bookSourceUrl"].startswith("https://books.example.com/api#")
+
+
+def test_add_source_skips_existing_md5_from_database(tmp_path: Path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'source_index.db'}"
+    source = BookSourceProcessor(path=str(tmp_path), cate1="book", database_url=db_url)
+    normalized_source = {
+        "bookSourceUrl": "https://books.example.com/api",
+        "bookSourceName": "ExampleBook",
+        "bookSourceComment": "",
+    }
+    md5 = source.compute_source_md5(normalized_source)
+    upsert_source_index_records(
+        records=[
+            {
+                "md5": md5,
+                "source_type": "book",
+                "url_id": 10000001,
+                "hostname": "books.example.com",
+                "cate1": 10000000,
+            }
+        ],
+        source_type="book",
+        database_url=db_url,
+    )
+
+    source.loads()
+    added = source.add_source(
+        {
+            "bookSourceUrl": "https://books.example.com/api/",
+            "bookSourceName": "Example Book",
+        }
+    )
+
+    assert added is False
 
 
 def test_book_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path) -> None:
@@ -323,27 +364,132 @@ def test_generate_source_task_runs_in_order(monkeypatch) -> None:
     class _Extract(_BaseStep):
         step_name = "extract"
 
+    class _Merge:
+        def __init__(self, *args, **kwargs):
+            self.store = kwargs.get("store")
+
+        def run(self, limit=None):
+            calls.append(("merge", type(self.store).__name__ if self.store is not None else None))
+            return {"processed": 0, "merged": 0, "skipped": 0, "failed": 0}
+
     class _Upload(_BaseStep):
         step_name = "upload"
 
     class _Rss(_BaseStep):
         step_name = "rss"
 
+    class _Sync:
+        def __init__(self, *args, **kwargs):
+            self.path = kwargs.get("path")
+
+        def run_source(self, source_type, database_url=None):
+            calls.append(("sync", source_type, self.path, database_url))
+
     monkeypatch.setattr(generate_task_module, "LoadSourceBackupTask", _Extract)
     monkeypatch.setattr(generate_task_module, "DownloadSourceDataTask", _Download)
+    monkeypatch.setattr(generate_task_module, "SourceMergeRunner", _Merge)
     monkeypatch.setattr(generate_task_module, "DumpSourceBackupTask", _Compress)
+    monkeypatch.setattr(generate_task_module, "SyncLocalSourceRecordsTask", _Sync)
     monkeypatch.setattr(generate_task_module, "UploadSourceBatchesTask", _Upload)
     monkeypatch.setattr(generate_task_module, "PublishSourceReportTask", _Rss)
 
-    GenerateSourceTask().run_book()
+    GenerateSourceTask().run_book(
+        load=True, download=True, merge=True, dump=True, sync=True, upload=True, publish=True
+    )
 
     assert calls == [
         ("create_store", "/tmp/cache"),
         ("extract", "_Store"),
         ("download", "_Store"),
+        ("merge", "_Store"),
         ("compress", "_Store"),
+        ("sync", "book", "/tmp/cache", None),
         ("upload", "_Store"),
         ("rss", "_ReportBuilder"),
+    ]
+
+
+def test_generate_source_task_can_skip_steps(monkeypatch) -> None:
+    calls = []
+
+    class _Store:
+        pass
+
+    class _RemoteManager:
+        pass
+
+    class _ReportBuilder:
+        pass
+
+    class _Context:
+        def __init__(self):
+            self.remote_manager = _RemoteManager()
+            self.report_builder = _ReportBuilder()
+
+        def create_store(self, path):
+            calls.append(("create_store", path))
+            return _Store()
+
+    monkeypatch.setattr(
+        GenerateSourceTask,
+        "get_cache_root",
+        staticmethod(lambda: "/tmp/cache"),
+    )
+    monkeypatch.setattr(
+        GenerateSourceTask,
+        "build_context",
+        lambda self, source_type: _Context(),
+    )
+
+    class _BaseStep:
+        step_name = ""
+
+        def __init__(self, *args, **kwargs):
+            self.store = kwargs.get("store")
+            self.remote_manager = kwargs.get("remote_manager")
+            self.report_builder = kwargs.get("report_builder")
+
+        def run(self):
+            payload = self.store if self.store is not None else self.report_builder
+            calls.append((self.step_name, type(payload).__name__ if payload is not None else None))
+
+    class _Download(_BaseStep):
+        step_name = "download"
+
+    class _Merge:
+        def __init__(self, *args, **kwargs):
+            self.store = kwargs.get("store")
+
+        def run(self, limit=None):
+            calls.append(("merge", type(self.store).__name__ if self.store is not None else None))
+            return {"processed": 0, "merged": 0, "skipped": 0, "failed": 0}
+
+    class _Upload(_BaseStep):
+        step_name = "upload"
+
+    class _Sync:
+        def __init__(self, *args, **kwargs):
+            self.path = kwargs.get("path")
+
+        def run_source(self, source_type, database_url=None):
+            calls.append(("sync", source_type, self.path, database_url))
+
+    monkeypatch.setattr(generate_task_module, "LoadSourceBackupTask", _BaseStep)
+    monkeypatch.setattr(generate_task_module, "DownloadSourceDataTask", _Download)
+    monkeypatch.setattr(generate_task_module, "SourceMergeRunner", _Merge)
+    monkeypatch.setattr(generate_task_module, "DumpSourceBackupTask", _BaseStep)
+    monkeypatch.setattr(generate_task_module, "SyncLocalSourceRecordsTask", _Sync)
+    monkeypatch.setattr(generate_task_module, "UploadSourceBatchesTask", _Upload)
+    monkeypatch.setattr(generate_task_module, "PublishSourceReportTask", _BaseStep)
+
+    GenerateSourceTask().run_book(
+        load=False, download=True, merge=False, dump=False, sync=False, upload=True, publish=False
+    )
+
+    assert calls == [
+        ("create_store", "/tmp/cache"),
+        ("download", "_Store"),
+        ("upload", "_Store"),
     ]
 
 
@@ -380,6 +526,112 @@ def test_cleanup_stale_remote_batches_deletes_higher_counters() -> None:
     manager.cleanup_stale_remote_batches(1002)
 
     assert context.drive.deleted == ["a/1002", "a/1003"]
+
+
+def test_openai_compatible_merger_reads_stream_response(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self, decode_unicode=True):
+            return iter(
+                [
+                    'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
+                    'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}',
+                    'data: {"choices":[{"delta":{"content":" true}"}}]}',
+                    "data: [DONE]",
+                ]
+            )
+
+    def _fake_post(*args, **kwargs):
+        assert kwargs["stream"] is True
+        return _Response()
+
+    monkeypatch.setattr(merge_module.requests, "post", _fake_post)
+    merger = merge_module.OpenAICompatibleSourceMerger(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="deepseek/deepseek-reasoner",
+        timeout=30,
+    )
+
+    content = merger._post_and_collect_content(
+        {
+            "model": "deepseek/deepseek-reasoner",
+            "stream": True,
+            "messages": [{"role": "user", "content": "x"}],
+        }
+    )
+
+    assert content == '{"ok": true}'
+
+
+def test_openai_compatible_merger_retries_non_json_response(monkeypatch) -> None:
+    responses = iter(["not-json", '{"bookSourceUrl":"https://books.example.com/api/"}'])
+
+    def _fake_post_and_collect_content(self, payload):
+        return next(responses)
+
+    monkeypatch.setattr(
+        merge_module.OpenAICompatibleSourceMerger,
+        "_post_and_collect_content",
+        _fake_post_and_collect_content,
+    )
+    merger = merge_module.OpenAICompatibleSourceMerger(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="deepseek/deepseek-reasoner",
+        timeout=30,
+        max_retries=2,
+        retry_sleep_seconds=0,
+    )
+
+    result = merger.merge_sources(
+        source_type="book",
+        hostname="books.example.com",
+        versions=[{"bookSourceUrl": "https://books.example.com/api/"}],
+    )
+
+    assert result == {"bookSourceUrl": "https://books.example.com/api/"}
+
+
+def test_openai_compatible_merger_raises_after_retry_exhausted(monkeypatch) -> None:
+    def _fake_post_and_collect_content(self, payload):
+        return "still-not-json"
+
+    monkeypatch.setattr(
+        merge_module.OpenAICompatibleSourceMerger,
+        "_post_and_collect_content",
+        _fake_post_and_collect_content,
+    )
+    merger = merge_module.OpenAICompatibleSourceMerger(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="deepseek/deepseek-reasoner",
+        timeout=30,
+        max_retries=2,
+        retry_sleep_seconds=0,
+    )
+
+    try:
+        merger.merge_sources(
+            source_type="book",
+            hostname="books.example.com",
+            versions=[{"bookSourceUrl": "https://books.example.com/api/"}],
+        )
+    except ValueError as error:
+        assert "after 2 attempts" in str(error)
+    else:
+        raise AssertionError("Expected ValueError after retry exhaustion")
 
 
 def test_source_merge_runner_merges_candidates_back_to_source_file(tmp_path: Path) -> None:
@@ -484,3 +736,159 @@ def test_source_merge_runner_rejects_hostname_drift(tmp_path: Path) -> None:
     data = LocalSourceStore._load_json_safely(str(source_path))
     assert stats == {"processed": 1, "merged": 0, "skipped": 0, "failed": 1}
     assert data == original
+
+
+def test_source_merge_runner_prioritizes_more_versions_first(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    small_path = source_dir / "10000001.json"
+    large_path = source_dir / "10000002.json"
+
+    small_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://a.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://a.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "a.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+    large_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://b.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://b.example.com/api/"}},
+            {"md5_list": ["c"], "source": {"bookSourceName": "C", "bookSourceUrl": "https://b.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000002,
+          "hostname": "b.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    class FakeMerger:
+        def merge_sources(self, source_type, hostname, versions):
+            return versions[0]
+
+    runner = SourceMergeRunner(store=store, merger=FakeMerger())
+
+    ordered = runner.iter_source_files()
+
+    assert ordered == [str(large_path), str(small_path)]
+
+
+def test_source_merge_runner_splits_large_merge_requests(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["m1"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search1"}},
+            {"md5_list": ["m2"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search2"}},
+            {"md5_list": ["m3"], "source": {"bookSourceName": "C", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search3"}},
+            {"md5_list": ["m4"], "source": {"bookSourceName": "D", "bookSourceUrl": "https://books.example.com/api/", "ruleSearchUrl": "https://books.example.com/api/search4"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "books.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    class FakeMerger:
+        def merge_sources(self, source_type, hostname, versions):
+            calls.append(len(versions))
+            return versions[0]
+
+    stats = SourceMergeRunner(
+        store=store,
+        merger=FakeMerger(),
+        max_versions_per_merge=2,
+        max_prompt_chars=1,
+    ).run()
+
+    assert stats == {"processed": 1, "merged": 1, "skipped": 0, "failed": 0}
+    assert calls == [2, 2, 2]
+
+
+def test_sync_local_source_records_task_updates_mysql_tables(tmp_path: Path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'sync_source.db'}"
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book", database_url=db_url)
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [
+            {
+              "md5_list": ["merged-1", "merged-2"],
+              "source": {
+                "bookSourceName": "书源A",
+                "bookSourceUrl": "https://books.example.com/api/"
+              }
+            }
+          ],
+          "candidate": [
+            {
+              "md5_list": ["candidate-1"],
+              "source": {
+                "bookSourceName": "书源A增强",
+                "bookSourceUrl": "https://books.example.com/api/"
+              }
+            },
+            {
+              "md5_list": ["candidate-2", "candidate-3"],
+              "source": {
+                "bookSourceName": "书源A增强2",
+                "bookSourceUrl": "https://books.example.com/api/"
+              }
+            }
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "books.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    stats = SyncLocalSourceRecordsTask(path=str(tmp_path)).run_book(database_url=db_url)
+
+    detail_records = list_source_detail_records(source_type="book", database_url=db_url)
+    index_map = load_source_index_map(source_type="book", database_url=db_url)
+
+    assert stats == {"details": 1, "indexes": 5}
+    assert len(detail_records) == 1
+    assert detail_records[0].id == 10000001
+    assert detail_records[0].url == "books.example.com"
+    assert detail_records[0].version == 3
+    assert set(index_map.keys()) == {
+        "merged-1",
+        "merged-2",
+        "candidate-1",
+        "candidate-2",
+        "candidate-3",
+    }

@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import requests
 from nltlog import getLogger
 from nltsecret import read_secret
-from sqlalchemy import DateTime, Integer, String, create_engine, desc, func, select
+from sqlalchemy import DateTime, Integer, String, create_engine, delete, desc, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -43,9 +43,10 @@ class SourceDetailRecord(Base):
 
     __tablename__ = "source_detail_records"
 
+    source_type: Mapped[str] = mapped_column(String(32), primary_key=True)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    url: Mapped[str] = mapped_column(String(1024), unique=True, index=True, nullable=False)
-    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    url: Mapped[str] = mapped_column(String(1024), index=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -305,6 +306,74 @@ def upsert_source_index_records(
         session.commit()
 
 
+def replace_source_index_records(
+    records: List[Dict[str, Any]],
+    source_type: str,
+    database_url: Optional[str] = None,
+) -> None:
+    """Replace all source-index rows for a source type with the provided records."""
+    if not source_type:
+        raise ValueError("source_type is required")
+
+    init_source_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        session.execute(
+            delete(SourceIndexRecord).where(SourceIndexRecord.source_type == source_type)
+        )
+        for payload in records:
+            md5 = str(payload.get("md5") or "")
+            hostname = str(payload.get("hostname") or "")
+            url_id = payload.get("url_id")
+            cate1 = payload.get("cate1")
+            if not md5 or not hostname or url_id is None or cate1 is None:
+                continue
+            session.add(
+                SourceIndexRecord(
+                    md5=md5,
+                    source_type=source_type,
+                    url_id=int(url_id),
+                    hostname=hostname,
+                    cate1=int(cate1),
+                )
+            )
+        session.commit()
+
+
+def replace_source_detail_records(
+    records: List[Dict[str, Any]],
+    source_type: str,
+    database_url: Optional[str] = None,
+) -> None:
+    """Replace all source-detail rows for a source type with the provided records."""
+    if not source_type:
+        raise ValueError("source_type is required")
+
+    init_source_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        session.execute(
+            delete(SourceDetailRecord).where(SourceDetailRecord.source_type == source_type)
+        )
+        for payload in records:
+            record_id = payload.get("id")
+            url = str(payload.get("url") or "")
+            version = payload.get("version", 0)
+            if record_id is None or not url:
+                continue
+            session.add(
+                SourceDetailRecord(
+                    id=int(record_id),
+                    url=url,
+                    source_type=source_type,
+                    version=int(version),
+                )
+            )
+        session.commit()
+
+
 def load_source_detail_url_map(
     source_type: Optional[str] = None,
     database_url: Optional[str] = None,
@@ -316,8 +385,10 @@ def load_source_detail_url_map(
     }
 
 
-def _next_source_detail_id(session: Session) -> int:
-    current_max = session.execute(select(func.max(SourceDetailRecord.id))).scalar_one_or_none()
+def _next_source_detail_id(session: Session, source_type: str) -> int:
+    current_max = session.execute(
+        select(func.max(SourceDetailRecord.id)).where(SourceDetailRecord.source_type == source_type)
+    ).scalar_one_or_none()
     if current_max is None:
         return SOURCE_DETAIL_ID_START
     return max(int(current_max) + 1, SOURCE_DETAIL_ID_START)
@@ -327,6 +398,7 @@ def add_source_detail_url(
     url: str,
     source_type: str,
     source_id: Optional[int] = None,
+    version: int = 0,
     database_url: Optional[str] = None,
 ) -> SourceDetailRecord:
     """Add or update a source-detail URL record."""
@@ -334,6 +406,7 @@ def add_source_detail_url(
         url=url,
         source_type=source_type,
         source_id=source_id,
+        version=version,
         database_url=database_url,
     )
 
@@ -342,6 +415,7 @@ def upsert_source_detail_record(
     url: str,
     source_type: str,
     source_id: Optional[int] = None,
+    version: int = 0,
     database_url: Optional[str] = None,
 ) -> SourceDetailRecord:
     if not url:
@@ -355,14 +429,17 @@ def upsert_source_detail_record(
     session_factory = _get_session_factory(database_url=database_url)
 
     with session_factory() as session:
-        stmt = select(SourceDetailRecord).where(SourceDetailRecord.url == url)
+        stmt = select(SourceDetailRecord).where(
+            SourceDetailRecord.source_type == source_type,
+            SourceDetailRecord.url == url,
+        )
         record = session.execute(stmt).scalar_one_or_none()
 
         if record is None:
             record_id = (
                 normalized_source_id
                 if normalized_source_id is not None
-                else _next_source_detail_id(session)
+                else _next_source_detail_id(session, source_type=source_type)
             )
             record = SourceDetailRecord(id=record_id, url=url, source_type=source_type)
             session.add(record)
@@ -371,6 +448,7 @@ def upsert_source_detail_record(
                 record.id = normalized_source_id
             record.url = url
             record.source_type = source_type
+        record.version = int(version)
 
         session.commit()
         session.refresh(record)

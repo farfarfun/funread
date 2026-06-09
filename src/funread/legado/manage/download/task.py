@@ -6,6 +6,8 @@ from funsecret import read_secret
 from nltlog import getLogger
 from nlttask import Task
 
+from ..source.merge.task import SourceMergeRunner
+from ..source.sync.task import SyncLocalSourceRecordsTask
 from .context import SourceBuildContext
 from .core.constants import DEFAULT_DIR_PATH, DEFAULT_REPO
 from .core.store import DownloadSourceDataTask, DumpSourceBackupTask, LoadSourceBackupTask
@@ -52,34 +54,102 @@ class GenerateSourceTask(Task):
             "store": context.create_store(path),
         }
 
-    def run_pipeline(self, source_type: str, *args, **kwargs) -> Dict[str, Any]:
+    def run_pipeline(
+        self,
+        source_type: str,
+        load: bool = False,
+        download: bool = False,
+        merge: bool = False,
+        dump: bool = False,
+        sync: bool = False,
+        upload: bool = False,
+        publish: bool = False,
+        *args,
+        **kwargs,
+    ) -> Dict[str, Any]:
         runtime = self.build_runtime(source_type)
         context = runtime["context"]
         store = runtime["store"]
 
-        LoadSourceBackupTask(store=store).run()
-        DownloadSourceDataTask(store=store).run()
-        DumpSourceBackupTask(store=store).run()
-        UploadSourceBatchesTask(store=store, remote_manager=context.remote_manager).run()
-        PublishSourceReportTask(
-            report_builder=context.report_builder,
-            remote_manager=context.remote_manager,
-        ).run()
+        if load:
+            LoadSourceBackupTask(store=store).run()
+        if download:
+            DownloadSourceDataTask(store=store).run()
+        if merge:
+            SourceMergeRunner(store=store).run()
+        if dump:
+            DumpSourceBackupTask(store=store).run()
+        if sync:
+            SyncLocalSourceRecordsTask(path=runtime["path"]).run_source(
+                source_type="book" if source_type == "booksource" else "rss",
+                database_url=store.database_url,
+            )
+        if upload:
+            UploadSourceBatchesTask(store=store, remote_manager=context.remote_manager).run()
+        if publish:
+            PublishSourceReportTask(
+                report_builder=context.report_builder,
+                remote_manager=context.remote_manager,
+            ).run()
         return runtime
 
-    def run_book(self, *args, **kwargs) -> None:
+    def run_book(
+        self,
+        load: bool = False,
+        download: bool = False,
+        merge: bool = False,
+        dump: bool = False,
+        sync: bool = False,
+        upload: bool = False,
+        publish: bool = False,
+        *args,
+        **kwargs,
+    ) -> None:
         try:
             logger.info("Starting book source generation task")
-            self.run_pipeline("booksource", *args, **kwargs)
+            self.run_pipeline(
+                "booksource",
+                load=load,
+                download=download,
+                merge=merge,
+                dump=dump,
+                sync=sync,
+                upload=upload,
+                publish=publish,
+                *args,
+                **kwargs,
+            )
             logger.info("Book source generation task completed successfully")
         except Exception as e:
             logger.error(f"Book source generation failed: {e}")
             raise
 
-    def run_rss(self, *args, **kwargs) -> None:
+    def run_rss(
+        self,
+        load: bool = False,
+        download: bool = False,
+        merge: bool = False,
+        dump: bool = False,
+        sync: bool = False,
+        upload: bool = False,
+        publish: bool = False,
+        *args,
+        **kwargs,
+    ) -> None:
         try:
             logger.info("Starting RSS source generation task")
-            self.run_pipeline("rsssource", *args, **kwargs)
+            self.run_pipeline(
+                "rsssource",
+                load=load,
+                download=download,
+                merge=merge,
+                dump=dump,
+                sync=sync,
+                upload=upload,
+                publish=publish,
+                *args,
+                **kwargs,
+            )
             logger.info("RSS source generation task completed successfully")
         except Exception as e:
             logger.error(f"RSS source generation failed: {e}")

@@ -52,6 +52,10 @@ class SourceProcessor(LocalSourceStore):
         except Exception as e:
             logger.warning(f"Failed to persist download record for {url}: {e}")
 
+    @staticmethod
+    def compute_source_md5(source: Dict[str, Any]) -> str:
+        return get_md5_str(json.dumps(source, sort_keys=True, ensure_ascii=False))
+
     def url_index(self, url: str) -> int:
         if url in self.url_map:
             return self.url_map[url]
@@ -70,10 +74,13 @@ class SourceProcessor(LocalSourceStore):
         if source is None or len(source) == 0 or source_url_key not in source:
             return False
         try:
-            md5 = get_md5_str(json.dumps(source, sort_keys=True))
             source = self.source_format(source)
             if source_url_key not in source:
                 logger.warning(f"Source missing '{source_url_key}' field, skipping")
+                return False
+
+            md5 = self.compute_source_md5(source)
+            if md5 in self.md5_set:
                 return False
 
             source_url = source[source_url_key]

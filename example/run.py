@@ -44,6 +44,7 @@ def add_url_data():
 
 # add_url_data()
 
-GenerateSourceTask().run_book()
-GenerateSourceTask().run_rss()
-UpdateEntrance().run()
+# GenerateSourceTask().run_book(sync=True)
+GenerateSourceTask().run_book(merge=True)
+# GenerateSourceTask().run_rss()
+# UpdateEntrance().run()
