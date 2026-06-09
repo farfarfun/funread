@@ -22,6 +22,8 @@ DEFAULT_REPO = "farfarfun/funread-cache"
 DEFAULT_DIR_PATH = "funread/legado/snapshot/lasted"
 EXPORT_BATCH_SIZE = 500
 INITIAL_COUNTER = 1000
+MIN_UPLOAD_BATCH_SIZE = 20
+
 
 # 组织仓库列表
 ORG_REPOS = [
@@ -257,24 +259,46 @@ class GenerateSourceType:
                 counter = INITIAL_COUNTER
                 for data in runner.export_sources(size=EXPORT_BATCH_SIZE):
                     if data:
-                        self._upload_batch(data, counter)
-                        counter += 1
+                        counter = self._upload_batch(data, counter)
         except Exception as e:
             logger.error(f"Failed to export and upload: {e}")
             raise
 
-    def _upload_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
-        """上传数据批次"""
+    @staticmethod
+    def _is_file_too_large_error(error: Exception) -> bool:
+        """判断是否为远端文件过大错误"""
+        message = str(error).lower()
+        return "too large" in message or "422" in message
+
+    def _upload_single_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
+        """上传单个数据批次"""
+        git_path = f"{self.dir_path}/progress-{counter}.json"
+        self.drive.upload_file(
+            content=json.dumps(data),
+            fid=self.dir_path,
+            filepath=None,
+            filename=f"progress-{counter}.json",
+        )
+        logger.info(f"Uploaded {len(data)} sources to {git_path}")
+
+    def _upload_batch(self, data: List[Dict[str, Any]], counter: int) -> int:
+        """上传数据批次，必要时自动拆分为更小文件"""
         try:
-            git_path = f"{self.dir_path}/progress-{counter}.json"
-            self.drive.upload_file(
-                content=json.dumps(data),
-                fid=self.dir_path,
-                filepath=None,
-                filename=f"progress-{counter}.json",
-            )
-            logger.info(f"Uploaded {len(data)} sources to {git_path}")
+            self._upload_single_batch(data, counter)
+            return counter + 1
         except Exception as e:
+            if self._is_file_too_large_error(e) and len(data) > MIN_UPLOAD_BATCH_SIZE:
+                split_size = max(len(data) // 2, MIN_UPLOAD_BATCH_SIZE)
+                logger.warning(
+                    f"Batch {counter} too large with {len(data)} sources, split into chunks of {split_size}"
+                )
+                next_counter = counter
+                for start in range(0, len(data), split_size):
+                    next_counter = self._upload_batch(
+                        data[start : start + split_size], next_counter
+                    )
+                return next_counter
+
             logger.error(f"Failed to upload batch {counter}: {e}")
             raise
 
