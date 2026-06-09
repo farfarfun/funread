@@ -1,6 +1,7 @@
 """HTML生成和源文件管理模块"""
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 import re
@@ -373,7 +374,7 @@ class GenerateSourceType:
                     stale_files.append((counter, file.fid))
 
             for counter, fid in sorted(stale_files):
-                if self.drive.delete_file(fid):
+                if self.drive.delete(fid):
                     logger.info(f"Deleted stale remote batch progress-{counter}.json")
                 else:
                     logger.warning(f"Failed to delete stale remote batch progress-{counter}.json")
