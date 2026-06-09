@@ -1,6 +1,6 @@
 # import argparse
 
-# from funread.legado.task import GenerateSourceTask
+# from funread.legado.manage.download import RunSourcePipelineTask
 # from funread.legado.task import ReadODSProgressDataTask
 # from funread.legado.task import ReadODSSourceDataTask
 # from funread.legado.task import ReadODSUrlDataTask
@@ -27,7 +27,7 @@
 #     # 添加子命令
 #     push_parser = subparsers.add_parser("generate", help="git push")
 #     push_parser.add_argument("--quiet", default=True, help="quiet")
-#     push_parser.set_defaults(func=GenerateSourceTask().run)
+#     push_parser.set_defaults(func=RunSourcePipelineTask().run_book)
 
 #     # 添加子命令
 #     tag_parser = subparsers.add_parser("update", help="git build tag")

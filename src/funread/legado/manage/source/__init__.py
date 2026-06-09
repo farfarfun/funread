@@ -1,7 +1,7 @@
-"""Legado manage package."""
+"""源存储相关模块。"""
 
-from .publish import UpdateEntrance, UpdateRssTask
-from .source import (
+from .merge import MergeSourceTask, OpenAICompatibleSourceMerger, SourceMergeRunner
+from .storage import (
     SourceDetailRecord,
     SourceListRecord,
     add_source_detail_url,
@@ -15,10 +15,11 @@ from .source import (
 )
 
 __all__ = [
+    "MergeSourceTask",
+    "OpenAICompatibleSourceMerger",
     "SourceDetailRecord",
     "SourceListRecord",
-    "UpdateEntrance",
-    "UpdateRssTask",
+    "SourceMergeRunner",
     "add_source_detail_url",
     "add_source_list_url",
     "init_source_db",

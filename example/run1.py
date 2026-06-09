@@ -1,8 +1,16 @@
-from funread.legado.task import ReadODSUrlDataTask
+from funread.legado.manage.source import add_source_list_url
 
-task = ReadODSUrlDataTask()
-task.snapshot_download()
-task.add_book_source("https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan")
-task.add_rss_source("https://www.yckceo1.com/yuedu/rsss/json/id/43.json")
-print(len(task.url_manage.select_all()))
-task.snapshot_upload()
+
+def main():
+    add_source_list_url(
+        url="https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan",
+        source_type="book",
+    )
+    add_source_list_url(
+        url="https://www.yckceo1.com/yuedu/rsss/json/id/43.json",
+        source_type="rss",
+    )
+
+
+if __name__ == "__main__":
+    main()

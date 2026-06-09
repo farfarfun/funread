@@ -1,10 +1,13 @@
+"""入口页发布模块。"""
+
 from datetime import datetime
+import json
+import os
 
 import requests
 from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
-import os
-import json
+
 
 faker = Headers()
 
@@ -35,19 +38,12 @@ class UpdateEntrance:
                 }
             )
 
-        dl.append(
-            {
-                "title": "源仓库(新)",
-                "url": "https://link3.cc/yckceo",
-            }
-        )
-
+        dl.append({"title": "源仓库(新)", "url": "https://link3.cc/yckceo"})
         dl.append({"title": "开源阅读-语雀文档", "url": "https://www.yuque.com/legado"})
         dl.append({"title": "喵公子书源", "url": "http://yuedu.miaogongzi.net/gx.html"})
         dl.append({"title": "「阅读」APP 源-aoaostar", "url": "https://legado.aoaostar.com/"})
         dl.append({"title": "yiove", "url": "https://shuyuan.yiove.com/"})
 
-        #
         for line in dl:
             if "pic" not in line:
                 line["pic"] = self.random_icon()
@@ -63,7 +59,7 @@ class UpdateEntrance:
             content=json.dumps(data1),
             fid=os.path.dirname(dir_info["fid"]),
             filepath=None,
-            filename=f"source.json",
+            filename="source.json",
         )
 
     def update_main(self):
@@ -96,7 +92,7 @@ class UpdateEntrance:
             content=json.dumps(data2),
             fid="funread/legado/snapshot/lasted",
             filepath=None,
-            filename=f"funread.json",
+            filename="funread.json",
         )
 
     def run(self):
