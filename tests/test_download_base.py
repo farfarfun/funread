@@ -528,10 +528,10 @@ def test_cleanup_stale_remote_batches_deletes_higher_counters() -> None:
     assert context.drive.deleted == ["a/1002", "a/1003"]
 
 
-def test_openai_compatible_merger_reads_stream_response(monkeypatch) -> None:
+def test_openai_compatible_merger_reads_json_response(monkeypatch) -> None:
     class _Response:
         status_code = 200
-        text = ""
+        text = '{"choices":[{"message":{"content":"{\\"ok\\": true}"}}]}'
 
         def __enter__(self):
             return self
@@ -542,18 +542,10 @@ def test_openai_compatible_merger_reads_stream_response(monkeypatch) -> None:
         def raise_for_status(self):
             return None
 
-        def iter_lines(self, decode_unicode=True):
-            return iter(
-                [
-                    'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
-                    'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}',
-                    'data: {"choices":[{"delta":{"content":" true}"}}]}',
-                    "data: [DONE]",
-                ]
-            )
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
 
     def _fake_post(*args, **kwargs):
-        assert kwargs["stream"] is True
         return _Response()
 
     monkeypatch.setattr(merge_module.requests, "post", _fake_post)
@@ -567,7 +559,6 @@ def test_openai_compatible_merger_reads_stream_response(monkeypatch) -> None:
     content = merger._post_and_collect_content(
         {
             "model": "deepseek/deepseek-reasoner",
-            "stream": True,
             "messages": [{"role": "user", "content": "x"}],
         }
     )
@@ -738,7 +729,7 @@ def test_source_merge_runner_rejects_hostname_drift(tmp_path: Path) -> None:
     assert data == original
 
 
-def test_source_merge_runner_prioritizes_more_versions_first(tmp_path: Path) -> None:
+def test_source_merge_runner_prioritizes_fewer_versions_first(tmp_path: Path) -> None:
     store = BookSourceProcessor(path=str(tmp_path), cate1="book")
     source_dir = Path(store.path_bok) / "10000000-10000100"
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -787,7 +778,7 @@ def test_source_merge_runner_prioritizes_more_versions_first(tmp_path: Path) -> 
 
     ordered = runner.iter_source_files()
 
-    assert ordered == [str(large_path), str(small_path)]
+    assert ordered == [str(small_path), str(large_path)]
 
 
 def test_source_merge_runner_splits_large_merge_requests(tmp_path: Path) -> None:

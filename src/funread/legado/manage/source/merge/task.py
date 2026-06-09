@@ -22,7 +22,7 @@ logger = getLogger("funread")
 
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
-DEFAULT_LLM_TIMEOUT = 600
+DEFAULT_LLM_TIMEOUT = 1200
 DEFAULT_MAX_VERSIONS_PER_MERGE = 8
 DEFAULT_MAX_PROMPT_CHARS = 50000
 DEFAULT_LLM_MAX_RETRIES = 3
@@ -88,6 +88,7 @@ class OpenAICompatibleSourceMerger:
             "请把同一个站点的多个版本阅读源合并成一个最优版本。"
             "输出必须是合并后的单个源对象本身，必须是紧凑 JSON。"
             "不要输出解释，不要输出 markdown，不要输出数组，不要输出外层包装对象。"
+            "请直接给出最终答案，不要解释、不要分步骤、不要用‘思考’标签。"
             "要求：\n"
             "1. 保留同一含义下信息更完整、更具体的字段。\n"
             "2. 不要引入原始数据中不存在的新站点 URL。\n"
@@ -97,32 +98,6 @@ class OpenAICompatibleSourceMerger:
             f"6. source_type={source_type}, hostname={hostname}\n"
             f"原始版本如下：\n{versions_json}"
         )
-
-    @staticmethod
-    def _extract_stream_delta(payload: Dict[str, Any]) -> Dict[str, str]:
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return {}
-        choice = choices[0]
-        if not isinstance(choice, dict):
-            return {}
-        delta = choice.get("delta")
-        if isinstance(delta, dict):
-            reasoning = delta.get("reasoning_content")
-            content = delta.get("content")
-            result: Dict[str, str] = {}
-            if isinstance(reasoning, str):
-                result["reasoning"] = reasoning
-            if isinstance(content, str):
-                result["content"] = content
-            if result:
-                return result
-        message = choice.get("message")
-        if isinstance(message, dict):
-            content = message.get("content")
-            if isinstance(content, str):
-                return {"content": content}
-        return {}
 
     def _post_and_collect_content(self, payload: Dict[str, Any]) -> str:
         headers = {
@@ -135,97 +110,38 @@ class OpenAICompatibleSourceMerger:
             "Start LLM merge request: "
             f"model={self.model}, versions_payload_chars={len(json.dumps(payload, ensure_ascii=False))}"
         )
-        with requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-            stream=bool(payload.get("stream")),
-        ) as response:
+        with requests.post(url, headers=headers, json=payload, timeout=self.timeout) as response:
             logger.info(
                 "LLM merge response headers received: "
                 f"status={response.status_code}, elapsed={time.time() - request_started_at:.2f}s"
             )
             response.raise_for_status()
-            if not payload.get("stream"):
-                try:
-                    result = response.json()
-                except Exception:
-                    return response.text
-                choices = result.get("choices", [])
-                if choices and isinstance(choices[0], dict):
-                    message = choices[0].get("message", {})
-                    if isinstance(message, dict):
-                        content = message.get("content")
-                        if isinstance(content, str):
-                            logger.info(
-                                "LLM merge request finished: "
-                                f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(content)}"
-                            )
-                            return content
+            try:
+                result = response.json()
+            except Exception:
                 text = response.text
                 logger.info(
                     "LLM merge request finished with raw text: "
                     f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(text)}"
                 )
                 return text
-
-            content_fragments: List[str] = []
-            reasoning_chars = 0
-            event_count = 0
-            first_chunk_logged = False
-            for raw_line in response.iter_lines(decode_unicode=False):
-                if not raw_line:
-                    continue
-                if isinstance(raw_line, bytes):
-                    try:
-                        line = raw_line.decode("utf-8").strip()
-                    except UnicodeDecodeError:
-                        line = raw_line.decode("utf-8", errors="ignore").strip()
-                        logger.warning(
-                            "Decode LLM stream line with ignored utf-8 errors: "
-                            f"raw_bytes={len(raw_line)}"
-                        )
-                else:
-                    line = raw_line.strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                event_count += 1
-                try:
-                    event_payload = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid LLM stream payload: {data[:200]}")
-                    continue
-                delta = self._extract_stream_delta(event_payload)
-                reasoning_piece = delta.get("reasoning", "")
-                content_piece = delta.get("content", "")
-                if reasoning_piece:
-                    reasoning_chars += len(reasoning_piece)
-                if content_piece:
-                    content_fragments.append(content_piece)
-                    if not first_chunk_logged:
+            choices = result.get("choices", [])
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get("message", {})
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str):
                         logger.info(
-                            "LLM merge first stream chunk received: "
-                            f"elapsed={time.time() - request_started_at:.2f}s, chunk_chars={len(content_piece)}"
+                            "LLM merge request finished: "
+                            f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(content)}"
                         )
-                        first_chunk_logged = True
-                    elif event_count % 20 == 0:
-                        logger.info(
-                            "LLM merge stream progress: "
-                            f"elapsed={time.time() - request_started_at:.2f}s, "
-                            f"events={event_count}, reasoning_chars={reasoning_chars}, "
-                            f"content_chars={sum(len(item) for item in content_fragments)}"
-                        )
-            content = "".join(content_fragments)
+                        return content
+            text = response.text
             logger.info(
-                "LLM merge stream finished: "
-                f"elapsed={time.time() - request_started_at:.2f}s, "
-                f"events={event_count}, reasoning_chars={reasoning_chars}, content_chars={len(content)}"
+                "LLM merge request finished with raw text: "
+                f"elapsed={time.time() - request_started_at:.2f}s, content_chars={len(text)}"
             )
-            return content
+            return text
 
     def merge_sources(
         self,
@@ -238,7 +154,6 @@ class OpenAICompatibleSourceMerger:
         payload = {
             "model": self.model,
             "temperature": 0,
-            "stream": True,
             "messages": [
                 {"role": "system", "content": "你只返回一个合法、紧凑、无包装层的 JSON 对象。"},
                 {
@@ -325,7 +240,7 @@ class SourceMergeRunner:
                 if name.endswith(".json"):
                     file_path = os.path.join(root, name)
                     file_list.append((self._read_version_count(file_path), file_path))
-        file_list.sort(key=lambda item: (-item[0], item[1]))
+        file_list.sort(key=lambda item: (item[0], item[1]))
         return [file_path for _, file_path in file_list]
 
     def merge_file(self, file_path: str) -> str:
