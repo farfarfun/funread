@@ -160,3 +160,35 @@ def test_generate_source_type_formats_size_and_counts_sources(tmp_path: Path) ->
     assert generator.format_file_size(1536) == "1.5 KB"
     assert generator.format_file_size(1024 * 1024) == "1.0 MB"
     assert generator.extract_source_count({"fid": "a/b.json", "name": "b.json"}) == "3"
+
+
+def test_cleanup_stale_remote_batches_deletes_higher_counters() -> None:
+    generator = generate_module.GenerateSourceType.__new__(generate_module.GenerateSourceType)
+    generator.dir_path = "funread/legado/snapshot/lasted/book"
+
+    class _File:
+        def __init__(self, name, fid):
+            self.name = name
+            self.fid = fid
+
+    class _Drive:
+        def __init__(self):
+            self.deleted = []
+
+        def get_file_list(self, fid):
+            return [
+                _File("progress-1000.json", "a/1000"),
+                _File("progress-1002.json", "a/1002"),
+                _File("progress-1003.json", "a/1003"),
+                _File("index.html", "a/index"),
+            ]
+
+        def delete_file(self, fid):
+            self.deleted.append(fid)
+            return True
+
+    generator.drive = _Drive()
+
+    generator._cleanup_stale_remote_batches(1002)
+
+    assert generator.drive.deleted == ["a/1002", "a/1003"]

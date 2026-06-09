@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import json
+import re
 import tempfile
 from dominate.tags import *
 from fundrive.drives.github import GithubDrive
@@ -315,6 +316,7 @@ class GenerateSourceType:
                 for data in runner.export_sources(size=EXPORT_BATCH_SIZE):
                     if data:
                         counter = self._upload_batch(data, counter)
+                self._cleanup_stale_remote_batches(counter)
         except Exception as e:
             logger.error(f"Failed to export and upload: {e}")
             raise
@@ -356,6 +358,27 @@ class GenerateSourceType:
 
             logger.error(f"Failed to upload batch {counter}: {e}")
             raise
+
+    def _cleanup_stale_remote_batches(self, next_counter: int) -> None:
+        """删除本次生成范围之后残留的远端 progress 文件"""
+        try:
+            files = self.drive.get_file_list(self.dir_path)
+            stale_files = []
+            for file in files:
+                match = re.fullmatch(r"progress-(\d+)\.json", str(file.name))
+                if not match:
+                    continue
+                counter = int(match.group(1))
+                if counter >= next_counter:
+                    stale_files.append((counter, file.fid))
+
+            for counter, fid in sorted(stale_files):
+                if self.drive.delete_file(fid):
+                    logger.info(f"Deleted stale remote batch progress-{counter}.json")
+                else:
+                    logger.warning(f"Failed to delete stale remote batch progress-{counter}.json")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup stale remote batches: {e}")
 
     def update_rss(self) -> None:
         """更新 RSS 配置"""
