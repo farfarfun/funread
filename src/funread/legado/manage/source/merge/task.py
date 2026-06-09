@@ -171,10 +171,20 @@ class OpenAICompatibleSourceMerger:
             reasoning_chars = 0
             event_count = 0
             first_chunk_logged = False
-            for raw_line in response.iter_lines(decode_unicode=True):
+            for raw_line in response.iter_lines(decode_unicode=False):
                 if not raw_line:
                     continue
-                line = raw_line.strip()
+                if isinstance(raw_line, bytes):
+                    try:
+                        line = raw_line.decode("utf-8").strip()
+                    except UnicodeDecodeError:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        logger.warning(
+                            "Decode LLM stream line with ignored utf-8 errors: "
+                            f"raw_bytes={len(raw_line)}"
+                        )
+                else:
+                    line = raw_line.strip()
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()

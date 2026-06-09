@@ -1,5 +1,7 @@
 """Source download package."""
 
+from importlib import import_module
+
 from .core import (
     DEFAULT_BACKUP_HOST,
     DEFAULT_BACKUP_ID,
@@ -26,7 +28,6 @@ from .sources import (
     RSSSourceProcessor,
     SourceStoreFactory,
 )
-from .task import GenerateSourceTask
 
 __all__ = [
     "BookSourceFormat",
@@ -54,3 +55,9 @@ __all__ = [
     "SourceStoreFactory",
     "UploadSourceBatchesTask",
 ]
+
+
+def __getattr__(name):
+    if name == "GenerateSourceTask":
+        return import_module(".task", __name__).GenerateSourceTask
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
