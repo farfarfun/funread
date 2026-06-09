@@ -482,6 +482,8 @@ class DownloadSource:
                         continue
                     if key == "candidate":
                         _data = _data[:3]
+                    else:
+                        _data = _data[:5]
                     for item in data[key]:  # 每个文件最多取前3个
                         if "source" not in item or "md5_list" not in item:
                             continue

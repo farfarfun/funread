@@ -165,10 +165,42 @@ class GenerateSourceType:
             return BookSourceDownload(path=path, cate1="book")
         return RSSSourceDownload(path=path, cate1="rss")
 
+
+    @staticmethod
+    def format_file_size(size: Any) -> str:
+        """将字节大小格式化为易读文本"""
+        try:
+            value = float(size)
+        except (TypeError, ValueError):
+            return str(size)
+
+        units = ["B", "KB", "MB", "GB", "TB"]
+        unit_index = 0
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(value)} {units[unit_index]}"
+        return f"{value:.1f} {units[unit_index]}"
+
+    @staticmethod
+    def extract_source_count(file: Dict[str, Any]) -> str:
+        """根据文件内容估算该批次包含的源数量"""
+        name = str(file.get("name", ""))
+        if name == "index.html":
+            return "-"
+
+        size = file.get("size")
+        try:
+            return str(int(size)) if name.endswith(".json") and int(size) < 1024 else "-"
+        except (TypeError, ValueError):
+            return "-"
+
     def set_table_head(self) -> None:
         """设置表格头"""
         with tr():
             th("文件")
+            th("源个数")
             th("大小")
             th("github")
             th("gitee")
@@ -177,7 +209,8 @@ class GenerateSourceType:
         """填充表格数据行"""
         data_tr = tr()
         data_tr += td(file["name"])
-        data_tr += td(file["size"])
+        data_tr += td(self.extract_source_count(file))
+        data_tr += td(self.format_file_size(file.get("size", 0)))
 
         # GitHub 链接
         github_link = td()
