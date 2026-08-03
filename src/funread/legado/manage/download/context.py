@@ -44,17 +44,24 @@ class SourceBuildContext:
     def create_store(self, path: str):
         return SourceStoreFactory.create(path=path, source_type=self.source_type)
 
+    def _get_report_builder(self) -> SourceReportBuilder:
+        report_builder = getattr(self, "report_builder", None)
+        if report_builder is None:
+            report_builder = SourceReportBuilder(self)
+            self.report_builder = report_builder
+        return report_builder
+
     def format_file_size(self, size: Any) -> str:
-        return self.report_builder.format_file_size(size)
+        return self._get_report_builder().format_file_size(size)
 
     def extract_source_count(self, file: Dict[str, Any]) -> str:
-        return self.report_builder.extract_source_count(file)
+        return self._get_report_builder().extract_source_count(file)
 
     def generate_table(self) -> None:
-        self.report_builder.generate_table()
+        self._get_report_builder().generate_table()
 
     def generate_html_report(self) -> str:
-        return self.report_builder.generate_html_report()
+        return self._get_report_builder().generate_html_report()
 
     def upload_single_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
         self.remote_manager.upload_single_batch(data, counter)

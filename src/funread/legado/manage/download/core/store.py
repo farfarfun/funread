@@ -12,6 +12,7 @@ from nltlog import getLogger
 from nlttask import Task
 from tqdm import tqdm
 
+from ...source.storage import SOURCE_STATUS_AVAILABLE, SOURCE_STATUS_PENDING
 from .constants import DEFAULT_BACKUP_ID
 
 
@@ -160,7 +161,10 @@ class LocalSourceStore:
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                if not data.get("available", True):
+                status = data.get("status")
+                if status is None:
+                    status = SOURCE_STATUS_PENDING if data.get("available", True) else None
+                if status not in (SOURCE_STATUS_PENDING, SOURCE_STATUS_AVAILABLE):
                     continue
 
                 for key in ("merged", "candidate"):
@@ -193,6 +197,11 @@ class LocalSourceStore:
 
     def loads(self) -> None:
         logger.info("Loading persisted data")
+        if not self.database_url:
+            self.url_map = {}
+            self.current_id = DEFAULT_BACKUP_ID - 1
+            self.md5_set = {}
+            return
         try:
             from funread.legado.manage import load_source_detail_url_map
 
@@ -222,6 +231,8 @@ class LocalSourceStore:
     def dumps(self) -> None:
         logger.info("Saving data to persistent storage")
         self._ensure_directories()
+        if not self.database_url:
+            return
         try:
             if self.md5_set:
                 from funread.legado.manage import upsert_source_index_records

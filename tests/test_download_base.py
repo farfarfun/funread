@@ -4,6 +4,7 @@ import funread.legado.manage.download.reporting.remote as remote_module
 import funread.legado.manage.download.sources.book as book_module
 import funread.legado.manage.download.sources.rss as rss_module
 import funread.legado.manage.download.task as generate_task_module
+import funread.legado.manage.source.check.task as check_module
 import funread.legado.manage.source.merge.task as merge_module
 
 from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
@@ -18,7 +19,12 @@ from funread.legado.manage.download import (
 from funread.legado.manage.download.context import SourceBuildContext
 from funread.legado.manage.download.sources.book import BookSourceProcessor
 from funread.legado.manage.source import (
+    SOURCE_STATUS_AVAILABLE,
+    SOURCE_STATUS_BLACKLISTED,
+    SOURCE_STATUS_PENDING,
+    SOURCE_STATUS_UNAVAILABLE,
     SourceMergeRunner,
+    SourceStatusCheckRunner,
     SyncLocalSourceRecordsTask,
     add_source_detail_url,
     list_source_detail_records,
@@ -158,6 +164,61 @@ def test_rss_loader_reads_source_download_iterator(monkeypatch, tmp_path: Path) 
     assert exported[0]["sourceUrl"].startswith("https://rss.example.com/feed#")
 
 
+def test_export_sources_only_includes_pending_and_available_statuses(tmp_path: Path) -> None:
+    source = DummySourceProcessor(path=str(tmp_path), cate1="rss")
+    source_path = Path(source.path_bok) / "10000000-10000100"
+    source_path.mkdir(parents=True, exist_ok=True)
+
+    payloads = [
+        (
+            10000000,
+            SOURCE_STATUS_PENDING,
+            "https://rss.example.com/pending",
+        ),
+        (
+            10000001,
+            SOURCE_STATUS_AVAILABLE,
+            "https://rss.example.com/available",
+        ),
+        (
+            10000002,
+            SOURCE_STATUS_UNAVAILABLE,
+            "https://rss.example.com/unavailable",
+        ),
+        (
+            10000003,
+            SOURCE_STATUS_BLACKLISTED,
+            "https://rss.example.com/blacklisted",
+        ),
+    ]
+    for url_id, status, url in payloads:
+        (source_path / f"{url_id}.json").write_text(
+            remote_module.json.dumps(
+                {
+                    "status": status,
+                    "available": True,
+                    "customOrder": 1,
+                    "merged": [
+                        {
+                            "source": {"sourceUrl": url, "sourceName": str(url_id)},
+                            "md5_list": [f"md5-{url_id}"],
+                        }
+                    ],
+                    "candidate": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    exported = next(source.export_sources(size=10))
+
+    assert [item["sourceUrl"].split("#")[0] for item in exported] == [
+        "https://rss.example.com/pending",
+        "https://rss.example.com/available",
+    ]
+
+
 class _FakeDrive:
     def __init__(self, fail_threshold=None):
         self.fail_threshold = fail_threshold
@@ -244,6 +305,51 @@ def test_upload_single_batch_caches_source_count() -> None:
         )
         == "2"
     )
+
+
+def test_upload_only_includes_pending_and_available_sources(tmp_path: Path) -> None:
+    source = DummySourceProcessor(path=str(tmp_path), cate1="rss")
+    source_dir = Path(source.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    payloads = [
+        (10000000, SOURCE_STATUS_PENDING, "https://rss.example.com/pending"),
+        (10000001, SOURCE_STATUS_AVAILABLE, "https://rss.example.com/available"),
+        (10000002, SOURCE_STATUS_UNAVAILABLE, "https://rss.example.com/unavailable"),
+        (10000003, SOURCE_STATUS_BLACKLISTED, "https://rss.example.com/blacklisted"),
+    ]
+    for url_id, status, url in payloads:
+        (source_dir / f"{url_id}.json").write_text(
+            remote_module.json.dumps(
+                {
+                    "status": status,
+                    "available": True,
+                    "customOrder": 1,
+                    "merged": [
+                        {
+                            "source": {"sourceUrl": url, "sourceName": str(url_id)},
+                            "md5_list": [f"md5-{url_id}"],
+                        }
+                    ],
+                    "candidate": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    uploaded_batches = []
+
+    class _RemoteManager:
+        def upload_exported_sources(self, runner, export_batch_size):
+            uploaded_batches.extend(list(runner.export_sources(size=export_batch_size)))
+
+    UploadSourceBatchesTask(store=source, remote_manager=_RemoteManager()).run()
+
+    assert len(uploaded_batches) == 1
+    assert [item["sourceUrl"].split("#")[0] for item in uploaded_batches[0]] == [
+        "https://rss.example.com/pending",
+        "https://rss.example.com/available",
+    ]
 
 
 def test_source_step_tasks_delegate_to_generator() -> None:
@@ -781,6 +887,52 @@ def test_source_merge_runner_prioritizes_fewer_versions_first(tmp_path: Path) ->
     assert ordered == [str(small_path), str(large_path)]
 
 
+def test_source_merge_runner_filters_single_version_files(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    single_path = source_dir / "10000001.json"
+    multi_path = source_dir / "10000002.json"
+
+    single_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://a.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "a.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+    multi_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://b.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://b.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000002,
+          "hostname": "b.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = SourceMergeRunner(store=store)
+
+    ordered = runner.iter_source_files()
+
+    assert ordered == [str(multi_path)]
+
+
 def test_source_merge_runner_splits_large_merge_requests(tmp_path: Path) -> None:
     store = BookSourceProcessor(path=str(tmp_path), cate1="book")
     source_dir = Path(store.path_bok) / "10000000-10000100"
@@ -928,6 +1080,7 @@ def test_sync_local_source_records_task_updates_mysql_tables(tmp_path: Path) -> 
     assert detail_records[0].id == 10000001
     assert detail_records[0].url == "books.example.com"
     assert detail_records[0].version == 3
+    assert detail_records[0].status == SOURCE_STATUS_PENDING
     assert set(index_map.keys()) == {
         "merged-1",
         "merged-2",
@@ -935,3 +1088,300 @@ def test_sync_local_source_records_task_updates_mysql_tables(tmp_path: Path) -> 
         "candidate-2",
         "candidate-3",
     }
+
+
+def test_source_merge_runner_updates_mysql_tables_after_merge(tmp_path: Path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'merge_sync.db'}"
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book", database_url=db_url)
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "merged": [],
+          "candidate": [
+            {
+              "md5_list": ["old-1"],
+              "source": {
+                "bookSourceName": "书源A",
+                "bookSourceUrl": "https://books.example.com/api/",
+                "ruleSearchUrl": "https://books.example.com/search"
+              }
+            },
+            {
+              "md5_list": ["old-2"],
+              "source": {
+                "bookSourceName": "书源A增强",
+                "bookSourceUrl": "https://books.example.com/api/",
+                "ruleFindUrl": "https://books.example.com/explore"
+              }
+            }
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "books.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    class FakeMerger:
+        def merge_sources(self, source_type, hostname, versions):
+            return {
+                "bookSourceName": "书源A最终",
+                "bookSourceUrl": "https://books.example.com/api/",
+                "ruleSearchUrl": "https://books.example.com/search",
+                "ruleFindUrl": "https://books.example.com/explore",
+            }
+
+    stats = SourceMergeRunner(store=store, merger=FakeMerger()).run()
+    detail_records = list_source_detail_records(source_type="book", database_url=db_url)
+    index_map = load_source_index_map(source_type="book", database_url=db_url)
+
+    assert stats == {"processed": 1, "merged": 1, "skipped": 0, "failed": 0}
+    assert len(detail_records) == 1
+    assert detail_records[0].id == 10000001
+    assert detail_records[0].url == "books.example.com"
+    assert detail_records[0].version == 0
+    assert detail_records[0].status == SOURCE_STATUS_AVAILABLE
+    assert {"old-1", "old-2"}.issubset(set(index_map.keys()))
+    assert len(index_map) == 3
+    assert all(payload["url_id"] == 10000001 for payload in index_map.values())
+
+
+def test_source_merge_runner_skips_blacklisted_and_unavailable_files(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    allowed_path = source_dir / "10000001.json"
+    blocked_path = source_dir / "10000002.json"
+    blacklisted_path = source_dir / "10000003.json"
+
+    allowed_path.write_text(
+        """
+        {
+          "available": true,
+          "status": 1,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://a.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://a.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "a.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+    blocked_path.write_text(
+        """
+        {
+          "available": false,
+          "status": 3,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://b.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://b.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000002,
+          "hostname": "b.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+    blacklisted_path.write_text(
+        """
+        {
+          "available": true,
+          "status": 4,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://c.example.com/api/"}},
+            {"md5_list": ["b"], "source": {"bookSourceName": "B", "bookSourceUrl": "https://c.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000003,
+          "hostname": "c.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    runner = SourceMergeRunner(store=store, merger=lambda *args, **kwargs: None)
+
+    assert runner.iter_source_files() == [str(allowed_path)]
+
+
+def test_source_status_check_runner_updates_file_and_database_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_url = f"sqlite:///{tmp_path / 'check_status.db'}"
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book", database_url=db_url)
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "status": 1,
+          "merged": [],
+          "candidate": [
+            {
+              "md5_list": ["old-1"],
+              "source": {
+                "bookSourceName": "书源A",
+                "bookSourceUrl": "https://books.example.com/api/"
+              }
+            }
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "books.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    class _OkResponse:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(check_module.requests, "get", lambda *args, **kwargs: _OkResponse())
+
+    stats = SourceStatusCheckRunner(store=store).run()
+    data = LocalSourceStore._load_json_safely(str(source_path))
+    detail_records = list_source_detail_records(source_type="book", database_url=db_url)
+
+    assert stats == {"processed": 1, "available": 1, "unavailable": 0, "failed": 0}
+    assert data["available"] is True
+    assert data["status"] == SOURCE_STATUS_AVAILABLE
+    assert detail_records[0].status == SOURCE_STATUS_AVAILABLE
+
+
+def test_source_status_check_runner_skips_blacklisted_files(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "10000001.json"
+    source_path.write_text(
+        """
+        {
+          "available": true,
+          "status": 4,
+          "merged": [],
+          "candidate": [
+            {"md5_list": ["a"], "source": {"bookSourceName": "A", "bookSourceUrl": "https://a.example.com/api/"}}
+          ],
+          "final": false,
+          "url_id": 10000001,
+          "hostname": "a.example.com"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    assert SourceStatusCheckRunner(store=store).iter_source_files() == []
+
+
+def test_source_status_check_runner_runs_checks_in_parallel(tmp_path: Path, monkeypatch) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(4):
+        (source_dir / f"{10000001 + index}.json").write_text(
+            f"""
+            {{
+              "available": true,
+              "status": 1,
+              "merged": [],
+              "candidate": [
+                {{
+                  "md5_list": ["old-{index}"],
+                  "source": {{
+                    "bookSourceName": "书源{index}",
+                    "bookSourceUrl": "https://books{index}.example.com/api/"
+                  }}
+                }}
+              ],
+              "final": false,
+              "url_id": {10000001 + index},
+              "hostname": "books{index}.example.com"
+            }}
+            """,
+            encoding="utf-8",
+        )
+
+    observed_threads = set()
+
+    def _fake_check(self, file_path: str) -> str:
+        import threading
+        import time
+
+        observed_threads.add(threading.get_ident())
+        time.sleep(0.05)
+        return "available"
+
+    monkeypatch.setattr(SourceStatusCheckRunner, "check_file", _fake_check)
+
+    stats = SourceStatusCheckRunner(store=store, max_workers=4).run()
+
+    assert stats == {"processed": 4, "available": 4, "unavailable": 0, "failed": 0}
+    assert len(observed_threads) > 1
+
+
+def test_source_merge_runner_runs_merges_in_parallel(tmp_path: Path, monkeypatch) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    source_dir = Path(store.path_bok) / "10000000-10000100"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(4):
+        (source_dir / f"{10000001 + index}.json").write_text(
+            f"""
+            {{
+              "available": true,
+              "status": 1,
+              "merged": [],
+              "candidate": [
+                {{
+                  "md5_list": ["a-{index}"],
+                  "source": {{
+                    "bookSourceName": "书源{index}A",
+                    "bookSourceUrl": "https://books{index}.example.com/api/"
+                  }}
+                }},
+                {{
+                  "md5_list": ["b-{index}"],
+                  "source": {{
+                    "bookSourceName": "书源{index}B",
+                    "bookSourceUrl": "https://books{index}.example.com/api/"
+                  }}
+                }}
+              ],
+              "final": false,
+              "url_id": {10000001 + index},
+              "hostname": "books{index}.example.com"
+            }}
+            """,
+            encoding="utf-8",
+        )
+
+    observed_threads = set()
+
+    def _fake_merge(self, file_path: str) -> str:
+        import threading
+        import time
+
+        observed_threads.add(threading.get_ident())
+        time.sleep(0.05)
+        return "merged"
+
+    monkeypatch.setattr(SourceMergeRunner, "merge_file", _fake_merge)
+
+    stats = SourceMergeRunner(store=store, merger=lambda *args, **kwargs: None, max_workers=4).run()
+
+    assert stats == {"processed": 4, "merged": 4, "skipped": 0, "failed": 0}
+    assert len(observed_threads) > 1

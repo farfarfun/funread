@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 import requests
 from nltfile import pickle
 from nltlog import getLogger
-from funsecret import get_md5_str
+from nltsecret import get_md5_str
 
 from funread.legado.manage.utils import url_to_hostname
 
@@ -29,6 +29,8 @@ class SourceProcessor(LocalSourceStore):
         raise NotImplementedError("Subclass must implement source_format() method")
 
     def persist_download_record(self, url: str, source_data: Any) -> None:
+        if not self.database_url:
+            return
         try:
             from funread.legado.manage import upsert_source_list_record
 
@@ -46,7 +48,12 @@ class SourceProcessor(LocalSourceStore):
             else:
                 source_count = 0
 
-            upsert_source_list_record(url=url, source_type=self.cate1, source_count=source_count)
+            upsert_source_list_record(
+                url=url,
+                source_type=self.cate1,
+                source_count=source_count,
+                database_url=self.database_url,
+            )
         except ValueError:
             return
         except Exception as e:
@@ -59,6 +66,11 @@ class SourceProcessor(LocalSourceStore):
     def url_index(self, url: str) -> int:
         if url in self.url_map:
             return self.url_map[url]
+
+        if not self.database_url:
+            self.current_id += 1
+            self.url_map[url] = self.current_id
+            return self.current_id
 
         from funread.legado.manage import add_source_detail_url
 

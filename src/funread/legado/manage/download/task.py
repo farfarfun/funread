@@ -2,10 +2,11 @@
 
 from typing import Any, Dict
 
-from funsecret import read_secret
+from nltsecret import read_secret
 from nltlog import getLogger
 from nlttask import Task
 
+from ..source.check.task import CheckSourceStatusTask
 from ..source.merge.task import SourceMergeRunner
 from ..source.sync.task import SyncLocalSourceRecordsTask
 from .context import SourceBuildContext
@@ -47,11 +48,14 @@ class GenerateSourceTask(Task):
     def build_runtime(self, source_type: str) -> Dict[str, Any]:
         context = self.build_context(source_type)
         path = self.get_cache_root()
+        database_url = read_secret(cate1="funread", cate2="cache", cate3="source", cate4="db_url")
+        store = context.create_store(path)
+        setattr(store, "database_url", database_url)
         return {
             "path": path,
             "source_type": source_type,
             "context": context,
-            "store": context.create_store(path),
+            "store": store,
         }
 
     def run_pipeline(
@@ -59,6 +63,7 @@ class GenerateSourceTask(Task):
         source_type: str,
         load: bool = False,
         download: bool = False,
+        check: bool = False,
         merge: bool = False,
         dump: bool = False,
         sync: bool = False,
@@ -75,6 +80,10 @@ class GenerateSourceTask(Task):
             LoadSourceBackupTask(store=store).run()
         if download:
             DownloadSourceDataTask(store=store).run()
+        if check:
+            CheckSourceStatusTask(path=runtime["path"]).run_source(
+                source_type="book" if source_type == "booksource" else "rss",
+            )
         if merge:
             SourceMergeRunner(store=store).run()
         if dump:
@@ -82,7 +91,7 @@ class GenerateSourceTask(Task):
         if sync:
             SyncLocalSourceRecordsTask(path=runtime["path"]).run_source(
                 source_type="book" if source_type == "booksource" else "rss",
-                database_url=store.database_url,
+                database_url=getattr(store, "database_url", None),
             )
         if upload:
             UploadSourceBatchesTask(store=store, remote_manager=context.remote_manager).run()
@@ -97,6 +106,7 @@ class GenerateSourceTask(Task):
         self,
         load: bool = False,
         download: bool = False,
+        check: bool = False,
         merge: bool = False,
         dump: bool = False,
         sync: bool = False,
@@ -111,6 +121,7 @@ class GenerateSourceTask(Task):
                 "booksource",
                 load=load,
                 download=download,
+                check=check,
                 merge=merge,
                 dump=dump,
                 sync=sync,
@@ -128,6 +139,7 @@ class GenerateSourceTask(Task):
         self,
         load: bool = False,
         download: bool = False,
+        check: bool = False,
         merge: bool = False,
         dump: bool = False,
         sync: bool = False,
@@ -142,6 +154,7 @@ class GenerateSourceTask(Task):
                 "rsssource",
                 load=load,
                 download=download,
+                check=check,
                 merge=merge,
                 dump=dump,
                 sync=sync,

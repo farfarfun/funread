@@ -5,17 +5,26 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Protocol
 
 import requests
 from nltlog import getLogger
 from nltsecret import read_secret
 from nlttask import Task
+from tqdm import tqdm
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
 from ...download.sources.rss import RSSSourceProcessor
 from ...utils import url_to_hostname
+from ..storage import (
+    SOURCE_STATUS_AVAILABLE,
+    SOURCE_STATUS_PENDING,
+    SOURCE_STATUS_UNAVAILABLE,
+    load_source_detail_status_map,
+)
+from ..sync.task import SyncLocalSourceRecordsTask
 
 
 logger = getLogger("funread")
@@ -27,6 +36,7 @@ DEFAULT_MAX_VERSIONS_PER_MERGE = 8
 DEFAULT_MAX_PROMPT_CHARS = 50000
 DEFAULT_LLM_MAX_RETRIES = 3
 DEFAULT_LLM_RETRY_SLEEP_SECONDS = 2
+DEFAULT_MERGE_WORKERS = 4
 
 
 class SourceMerger(Protocol):
@@ -213,35 +223,96 @@ class SourceMergeRunner:
         min_versions: int = 2,
         max_versions_per_merge: int = DEFAULT_MAX_VERSIONS_PER_MERGE,
         max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
+        max_workers: int = DEFAULT_MERGE_WORKERS,
     ):
         self.store = store
         self.merger = merger or OpenAICompatibleSourceMerger()
         self.min_versions = min_versions
         self.max_versions_per_merge = max_versions_per_merge
         self.max_prompt_chars = max_prompt_chars
+        self.max_workers = max(1, int(max_workers))
 
     def run(self, limit: Optional[int] = None) -> Dict[str, int]:
         stats = {"processed": 0, "merged": 0, "skipped": 0, "failed": 0}
-        for file_path in self.iter_source_files():
-            if limit is not None and stats["processed"] >= limit:
-                break
-            stats["processed"] += 1
-            logger.info(f"Start merge source file: {file_path}")
-            status = self.merge_file(file_path)
-            stats[status] += 1
+        file_paths = self.iter_source_files()
+        if limit is not None:
+            file_paths = file_paths[:limit]
+        total = len(file_paths)
+        if total == 0:
+            return stats
+
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, total)) as executor:
+            futures = []
+            for file_path in file_paths:
+                logger.info(f"Start merge source file: {file_path}")
+                futures.append(executor.submit(self.merge_file, file_path))
+            for future in tqdm(
+                as_completed(futures), total=total, desc=f"merge-{self.store.cate1}"
+            ):
+                stats["processed"] += 1
+                try:
+                    status = future.result()
+                except Exception as e:
+                    logger.warning(f"Failed to collect source merge result: {e}")
+                    status = "failed"
+                stats[status] += 1
         return stats
 
     def iter_source_files(self) -> List[str]:
         file_list: List[tuple[int, str]] = []
+        allowed_statuses = {SOURCE_STATUS_PENDING, SOURCE_STATUS_AVAILABLE}
+        status_map = self._load_status_map()
         if not os.path.exists(self.store.path_bok):
             return []
         for root, _, files in os.walk(self.store.path_bok):
             for name in files:
                 if name.endswith(".json"):
                     file_path = os.path.join(root, name)
-                    file_list.append((self._read_version_count(file_path), file_path))
+                    url_id = self._extract_url_id_from_path(file_path)
+                    if url_id is not None:
+                        status = status_map.get(url_id, self._read_file_status(file_path))
+                        if status not in allowed_statuses:
+                            continue
+                    else:
+                        status = self._read_file_status(file_path)
+                        if status not in allowed_statuses:
+                            continue
+                    version_count = self._read_version_count(file_path)
+                    if version_count < self.min_versions:
+                        continue
+                    file_list.append((version_count, file_path))
         file_list.sort(key=lambda item: (item[0], item[1]))
         return [file_path for _, file_path in file_list]
+
+    def _load_status_map(self) -> Dict[int, int]:
+        database_url = getattr(self.store, "database_url", None)
+        if not database_url:
+            return {}
+        try:
+            return load_source_detail_status_map(
+                source_type=self.store.cate1,
+                database_url=database_url,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load source status map for merge: {e}")
+            return {}
+
+    @staticmethod
+    def _extract_url_id_from_path(file_path: str) -> Optional[int]:
+        name = os.path.splitext(os.path.basename(file_path))[0]
+        return int(name) if name.isdigit() else None
+
+    def _read_file_status(self, file_path: str) -> int:
+        try:
+            data = self.store._load_json_safely(file_path)
+        except Exception:
+            return SOURCE_STATUS_PENDING
+        status = data.get("status")
+        if isinstance(status, int):
+            return status
+        if data.get("available", True) is False:
+            return SOURCE_STATUS_UNAVAILABLE
+        return SOURCE_STATUS_PENDING
 
     def merge_file(self, file_path: str) -> str:
         try:
@@ -264,9 +335,12 @@ class SourceMergeRunner:
                 hostname=hostname,
                 version_items=version_items,
             )
+            data["available"] = True
+            data["status"] = SOURCE_STATUS_AVAILABLE
             data["merged"] = [merged_item]
             data["candidate"] = []
             self.store._save_json_safely(file_path, data)
+            self._sync_database_record(file_path=file_path, status=SOURCE_STATUS_AVAILABLE)
             logger.info(
                 "Merged source successfully: "
                 f"file={file_path}, hostname={hostname}, versions={len(version_items)}"
@@ -472,7 +546,7 @@ class SourceMergeRunner:
 
     @staticmethod
     def _compute_md5(source: Dict[str, Any]) -> str:
-        from funsecret import get_md5_str
+        from nltsecret import get_md5_str
 
         return get_md5_str(json.dumps(source, sort_keys=True, ensure_ascii=False))
 
@@ -496,6 +570,21 @@ class SourceMergeRunner:
         json.dumps(normalized, ensure_ascii=False)
         return normalized
 
+    def _sync_database_record(self, file_path: str, status: Optional[int] = None) -> None:
+        database_url = getattr(self.store, "database_url", None)
+        if not database_url:
+            return
+        stats = SyncLocalSourceRecordsTask(path=self.store.path_rot).sync_file(
+            store=self.store,
+            file_path=file_path,
+            status=status,
+            database_url=database_url,
+        )
+        logger.info(
+            "Synced merged source to database: "
+            f"file={file_path}, details={stats['details']}, indexes={stats['indexes']}"
+        )
+
 
 class MergeSourceTask(Task):
     """Run source merge for local source files."""
@@ -509,11 +598,13 @@ class MergeSourceTask(Task):
         return read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
 
     @staticmethod
-    def _create_store(path: str, source_type: str) -> SourceProcessor:
+    def _create_store(
+        path: str, source_type: str, database_url: Optional[str] = None
+    ) -> SourceProcessor:
         if source_type == "book":
-            return BookSourceProcessor(path=path, cate1="book")
+            return BookSourceProcessor(path=path, cate1="book", database_url=database_url)
         if source_type == "rss":
-            return RSSSourceProcessor(path=path, cate1="rss")
+            return RSSSourceProcessor(path=path, cate1="rss", database_url=database_url)
         raise ValueError(f"Unsupported source type: {source_type}")
 
     def run_source(
@@ -521,13 +612,46 @@ class MergeSourceTask(Task):
         source_type: str,
         merger: Optional[SourceMerger] = None,
         limit: Optional[int] = None,
+        max_workers: int = DEFAULT_MERGE_WORKERS,
     ) -> Dict[str, int]:
-        with self._create_store(self.path, source_type=source_type) as store:
-            runner = SourceMergeRunner(store=store, merger=merger)
+        try:
+            database_url = read_secret(
+                cate1="funread", cate2="cache", cate3="source", cate4="db_url"
+            )
+        except Exception:
+            database_url = None
+        with self._create_store(
+            self.path, source_type=source_type, database_url=database_url
+        ) as store:
+            runner = SourceMergeRunner(
+                store=store,
+                merger=merger,
+                max_workers=max_workers,
+            )
             return runner.run(limit=limit)
 
-    def run_book(self, merger: Optional[SourceMerger] = None, limit: Optional[int] = None):
-        return self.run_source(source_type="book", merger=merger, limit=limit)
+    def run_book(
+        self,
+        merger: Optional[SourceMerger] = None,
+        limit: Optional[int] = None,
+        max_workers: int = DEFAULT_MERGE_WORKERS,
+    ):
+        return self.run_source(
+            source_type="book",
+            merger=merger,
+            limit=limit,
+            max_workers=max_workers,
+        )
 
-    def run_rss(self, merger: Optional[SourceMerger] = None, limit: Optional[int] = None):
-        return self.run_source(source_type="rss", merger=merger, limit=limit)
+    def run_rss(
+        self,
+        merger: Optional[SourceMerger] = None,
+        limit: Optional[int] = None,
+        max_workers: int = DEFAULT_MERGE_WORKERS,
+    ):
+        return self.run_source(
+            source_type="rss",
+            merger=merger,
+            limit=limit,
+            max_workers=max_workers,
+        )

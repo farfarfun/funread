@@ -27,7 +27,16 @@ class BookSourceFormat:
         self.format_search()
         self.format_explore()
         self.format_toc()
-        keys_to_remove = [key for key in self.source.keys() if not self.source[key]]
+        rule_search = self.source.get("ruleSearch")
+        if isinstance(rule_search, dict) and set(rule_search.keys()) == {"url"}:
+            self.source["searchUrl"] = rule_search["url"]
+            self.source.pop("ruleSearch", None)
+
+        keys_to_remove = [
+            key
+            for key in self.source.keys()
+            if not self.source[key] and key not in {"bookSourceComment"}
+        ]
         for key in keys_to_remove:
             self.source.pop(key)
         for key in ["customOrder", "respondTime", "lastUpdateTime"]:
@@ -36,6 +45,10 @@ class BookSourceFormat:
         for key in ["searchUrl", "exploreUrl"]:
             if key in self.source and base_url:
                 self.source[key] = self.source[key].replace(base_url, "")
+        for key in ["ruleSearch", "ruleExplore", "ruleContent", "ruleToc"]:
+            value = self.source.get(key)
+            if isinstance(value, dict) and base_url and isinstance(value.get("url"), str):
+                value["url"] = value["url"].replace(base_url, "")
         return self.source
 
     def __format_base(self, group, mapping):

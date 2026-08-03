@@ -1,16 +1,40 @@
 """Source list and source detail persistence."""
 
-from datetime import datetime, timedelta
+import hashlib
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from nltlog import getLogger
 from nltsecret import read_secret
-from sqlalchemy import DateTime, Integer, String, create_engine, delete, desc, func, select
+from sqlalchemy import (
+    DateTime,
+    Integer,
+    String,
+    UniqueConstraint,
+    create_engine,
+    delete,
+    desc,
+    func,
+    inspect,
+    select,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
 logger = getLogger("funread")
+
+SOURCE_STATUS_PENDING = 1
+SOURCE_STATUS_AVAILABLE = 2
+SOURCE_STATUS_UNAVAILABLE = 3
+SOURCE_STATUS_BLACKLISTED = 4
+VALID_SOURCE_STATUSES = {
+    SOURCE_STATUS_PENDING,
+    SOURCE_STATUS_AVAILABLE,
+    SOURCE_STATUS_UNAVAILABLE,
+    SOURCE_STATUS_BLACKLISTED,
+}
 
 
 class Base(DeclarativeBase):
@@ -19,7 +43,7 @@ class Base(DeclarativeBase):
 
 def utcnow() -> datetime:
     """Return a naive UTC datetime for database timestamps."""
-    return datetime.utcnow()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class SourceListRecord(Base):
@@ -42,11 +66,16 @@ class SourceDetailRecord(Base):
     """Persisted source-detail URL mapping metadata."""
 
     __tablename__ = "source_detail_records"
+    __table_args__ = (UniqueConstraint("id", name="uq_source_detail_records_id"),)
 
     source_type: Mapped[str] = mapped_column(String(32), primary_key=True)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    url: Mapped[str] = mapped_column(String(1024), index=True, nullable=False)
+    url_md5: Mapped[str] = mapped_column(String(32), primary_key=True)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=SOURCE_STATUS_PENDING, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -73,6 +102,19 @@ _ENGINE_CACHE: Dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: Dict[str, sessionmaker] = {}
 _INITIALIZED_DATABASES = set()
 SOURCE_DETAIL_ID_START = 10_000_000
+
+
+def normalize_source_status(status: Optional[int]) -> int:
+    normalized = int(status or SOURCE_STATUS_PENDING)
+    if normalized not in VALID_SOURCE_STATUSES:
+        raise ValueError(f"Invalid source status: {status}")
+    return normalized
+
+
+def compute_url_md5(url: str) -> str:
+    if not url:
+        raise ValueError("url is required")
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
 
 
 def _get_database_url(database_url: Optional[str] = None) -> Optional[str]:
@@ -124,8 +166,84 @@ def init_source_db(database_url: Optional[str] = None) -> None:
     resolved_url = _get_database_url(database_url)
     if not resolved_url or resolved_url in _INITIALIZED_DATABASES:
         return
-    Base.metadata.create_all(_get_engine(resolved_url))
+    engine = _get_engine(resolved_url)
+    _migrate_source_detail_records_table(engine)
+    Base.metadata.create_all(engine)
     _INITIALIZED_DATABASES.add(resolved_url)
+
+
+def _migrate_source_detail_records_table(engine: Any) -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "source_detail_records" not in table_names:
+        Base.metadata.create_all(engine)
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("source_detail_records")}
+    pk_columns = tuple(
+        inspector.get_pk_constraint("source_detail_records").get("constrained_columns") or []
+    )
+    unique_constraints = inspector.get_unique_constraints("source_detail_records")
+    has_id_unique = any(
+        tuple(constraint.get("column_names") or []) == ("id",) for constraint in unique_constraints
+    )
+    target_pk = ("source_type", "url_md5")
+    needs_migration = (
+        pk_columns != target_pk
+        or "url_md5" not in columns
+        or "status" not in columns
+        or not has_id_unique
+    )
+    if not needs_migration:
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS source_detail_records_migrating"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE source_detail_records_migrating (
+                    source_type VARCHAR(32) NOT NULL,
+                    url_md5 VARCHAR(32) NOT NULL,
+                    url VARCHAR(1024) NOT NULL,
+                    id INTEGER NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    status INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    PRIMARY KEY (source_type, url_md5),
+                    UNIQUE (id)
+                )
+                """
+            )
+        )
+        rows = conn.execute(text("SELECT * FROM source_detail_records")).mappings().all()
+        for row in rows:
+            url = str(row["url"])
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO source_detail_records_migrating
+                        (source_type, url_md5, url, id, version, status, created_at, updated_at)
+                    VALUES
+                        (:source_type, :url_md5, :url, :id, :version, :status, :created_at, :updated_at)
+                    """
+                ),
+                {
+                    "source_type": row["source_type"],
+                    "url_md5": row.get("url_md5") or compute_url_md5(url),
+                    "url": url,
+                    "id": int(row["id"]),
+                    "version": int(row.get("version") or 0),
+                    "status": int(row.get("status") or SOURCE_STATUS_PENDING),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                },
+            )
+        conn.execute(text("DROP TABLE source_detail_records"))
+        conn.execute(
+            text("ALTER TABLE source_detail_records_migrating RENAME TO source_detail_records")
+        )
 
 
 def _count_source_items(source_data: Any) -> int:
@@ -211,6 +329,7 @@ def iter_source_list_data(
 
 def list_source_detail_records(
     source_type: Optional[str] = None,
+    statuses: Optional[List[int]] = None,
     database_url: Optional[str] = None,
 ) -> List[SourceDetailRecord]:
     """List source-detail records ordered by id."""
@@ -221,6 +340,12 @@ def list_source_detail_records(
         stmt = select(SourceDetailRecord)
         if source_type:
             stmt = stmt.where(SourceDetailRecord.source_type == source_type)
+        if statuses:
+            stmt = stmt.where(
+                SourceDetailRecord.status.in_(
+                    [normalize_source_status(status) for status in statuses]
+                )
+            )
         return session.execute(stmt.order_by(SourceDetailRecord.id)).scalars().all()
 
 
@@ -341,6 +466,45 @@ def replace_source_index_records(
         session.commit()
 
 
+def replace_source_index_records_for_url(
+    records: List[Dict[str, Any]],
+    source_type: str,
+    url_id: int,
+    database_url: Optional[str] = None,
+) -> None:
+    """Replace source-index rows for one source type/url_id pair."""
+    if not source_type:
+        raise ValueError("source_type is required")
+
+    init_source_db(database_url=database_url)
+    session_factory = _get_session_factory(database_url=database_url)
+
+    with session_factory() as session:
+        session.execute(
+            delete(SourceIndexRecord).where(
+                SourceIndexRecord.source_type == source_type,
+                SourceIndexRecord.url_id == int(url_id),
+            )
+        )
+        for payload in records:
+            md5 = str(payload.get("md5") or "")
+            hostname = str(payload.get("hostname") or "")
+            record_url_id = payload.get("url_id")
+            cate1 = payload.get("cate1")
+            if not md5 or not hostname or record_url_id is None or cate1 is None:
+                continue
+            session.add(
+                SourceIndexRecord(
+                    md5=md5,
+                    source_type=source_type,
+                    url_id=int(record_url_id),
+                    hostname=hostname,
+                    cate1=int(cate1),
+                )
+            )
+        session.commit()
+
+
 def replace_source_detail_records(
     records: List[Dict[str, Any]],
     source_type: str,
@@ -361,14 +525,17 @@ def replace_source_detail_records(
             record_id = payload.get("id")
             url = str(payload.get("url") or "")
             version = payload.get("version", 0)
+            status = normalize_source_status(payload.get("status"))
             if record_id is None or not url:
                 continue
             session.add(
                 SourceDetailRecord(
                     id=int(record_id),
                     url=url,
+                    url_md5=compute_url_md5(url),
                     source_type=source_type,
                     version=int(version),
+                    status=status,
                 )
             )
         session.commit()
@@ -385,10 +552,19 @@ def load_source_detail_url_map(
     }
 
 
-def _next_source_detail_id(session: Session, source_type: str) -> int:
-    current_max = session.execute(
-        select(func.max(SourceDetailRecord.id)).where(SourceDetailRecord.source_type == source_type)
-    ).scalar_one_or_none()
+def load_source_detail_status_map(
+    source_type: Optional[str] = None,
+    database_url: Optional[str] = None,
+) -> Dict[int, int]:
+    """Load source-detail status keyed by source id."""
+    return {
+        record.id: record.status
+        for record in list_source_detail_records(source_type=source_type, database_url=database_url)
+    }
+
+
+def _next_source_detail_id(session: Session) -> int:
+    current_max = session.execute(select(func.max(SourceDetailRecord.id))).scalar_one_or_none()
     if current_max is None:
         return SOURCE_DETAIL_ID_START
     return max(int(current_max) + 1, SOURCE_DETAIL_ID_START)
@@ -399,6 +575,7 @@ def add_source_detail_url(
     source_type: str,
     source_id: Optional[int] = None,
     version: int = 0,
+    status: int = SOURCE_STATUS_PENDING,
     database_url: Optional[str] = None,
 ) -> SourceDetailRecord:
     """Add or update a source-detail URL record."""
@@ -407,6 +584,7 @@ def add_source_detail_url(
         source_type=source_type,
         source_id=source_id,
         version=version,
+        status=status,
         database_url=database_url,
     )
 
@@ -416,6 +594,7 @@ def upsert_source_detail_record(
     source_type: str,
     source_id: Optional[int] = None,
     version: int = 0,
+    status: int = SOURCE_STATUS_PENDING,
     database_url: Optional[str] = None,
 ) -> SourceDetailRecord:
     if not url:
@@ -424,6 +603,8 @@ def upsert_source_detail_record(
         raise ValueError("source_type is required")
 
     normalized_source_id = int(source_id) if source_id is not None else None
+    normalized_status = normalize_source_status(status)
+    url_md5 = compute_url_md5(url)
 
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
@@ -431,24 +612,44 @@ def upsert_source_detail_record(
     with session_factory() as session:
         stmt = select(SourceDetailRecord).where(
             SourceDetailRecord.source_type == source_type,
-            SourceDetailRecord.url == url,
+            SourceDetailRecord.url_md5 == url_md5,
         )
         record = session.execute(stmt).scalar_one_or_none()
 
         if record is None:
+            if normalized_source_id is not None:
+                conflict = session.execute(
+                    select(SourceDetailRecord).where(SourceDetailRecord.id == normalized_source_id)
+                ).scalar_one_or_none()
+                if conflict is not None:
+                    conflict.source_type = source_type
+                    conflict.url = url
+                    conflict.url_md5 = url_md5
+                    conflict.version = int(version)
+                    conflict.status = normalized_status
+                    session.commit()
+                    session.refresh(conflict)
+                    return conflict
             record_id = (
                 normalized_source_id
                 if normalized_source_id is not None
-                else _next_source_detail_id(session, source_type=source_type)
+                else _next_source_detail_id(session)
             )
-            record = SourceDetailRecord(id=record_id, url=url, source_type=source_type)
+            record = SourceDetailRecord(
+                id=record_id,
+                url=url,
+                url_md5=url_md5,
+                source_type=source_type,
+            )
             session.add(record)
         else:
             if normalized_source_id is not None and record.id != normalized_source_id:
                 record.id = normalized_source_id
             record.url = url
+            record.url_md5 = url_md5
             record.source_type = source_type
         record.version = int(version)
+        record.status = normalized_status
 
         session.commit()
         session.refresh(record)
