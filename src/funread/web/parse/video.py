@@ -1,5 +1,3 @@
-from typing import List
-
 from pydantic import BaseModel
 
 from .base import BaseParse
@@ -9,13 +7,13 @@ class VideoInfo(BaseModel):
     text: str = ""
     pic_url: str = ""
     video_url: str = ""
-    description: str = None
+    description: str | None = None
 
 
 class VideoListInfo(BaseModel):
     page_no: int = 1
-    page_size = 10
-    video_list: List[VideoInfo] = []
+    page_size: int = 10
+    video_list: list[VideoInfo] = []
 
 
 class ParseVideo(BaseParse):

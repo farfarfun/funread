@@ -1,6 +1,6 @@
 [project]
 name = "funread"
-version = "1.1.91"
+version = "1.1.92"
 description = "一个用于管理和处理阅读源（Legado 阅读 APP 的书源和 RSS 源）的 Python 工具库"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 text = "Apache-2.0"
 
 [project.optional-dependencies]
-dev = [ "pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0", "black>=23.0.0",]
+dev = [ "pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0",]
 web = [ "nicegui>=2.0.0", "pydantic>=2.0.0",]
 
 [project.urls]
@@ -42,10 +42,6 @@ Releases = "https://github.com/farfarfun/funread/releases"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-
-[tool.black]
-line-length = 100
-target-version = [ "py312",]
 
 [tool.mypy]
 python_version = "3.12"
@@ -59,3 +55,11 @@ license-files = []
 [tool.ruff.lint]
 select = [ "E", "F", "I", "N", "W",]
 ignore = [ "E501",]
+
+[tool.uv.sources.fundrive]
+path = "../fundrive"
+editable = true
+
+[tool.uv.sources.nltsecret]
+path = "../nltsecret"
+editable = true
