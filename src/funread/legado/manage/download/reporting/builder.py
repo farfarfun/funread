@@ -11,7 +11,7 @@ from nltlog import getLogger
 logger = getLogger("funread")
 
 ORG_REPOS = [
-    ("nltsecret", "farfarfun/nltsecret"),
+    ("funsecret", "farfarfun/funsecret"),
     ("fundrive", "farfarfun/fundrive"),
     ("funread", "farfarfun/funread"),
 ]

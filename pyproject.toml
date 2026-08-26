@@ -1,12 +1,12 @@
 [project]
 name = "funread"
-version = "1.1.93"
+version = "1.1.94"
 description = "一个用于管理和处理阅读源（Legado 阅读 APP 的书源和 RSS 源）的 Python 工具库"
 readme = "README.md"
 requires-python = ">=3.12"
 keywords = [ "legado", "reading", "book-source", "rss", "ebook",]
 classifiers = [ "Development Status :: 4 - Beta", "Intended Audience :: Developers", "License :: OSI Approved :: Apache Software License", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3.12", "Topic :: Software Development :: Libraries :: Python Modules", "Topic :: Text Processing :: Markup",]
-dependencies = [ "dominate>=2.9.1", "fundrive>=2.0.81", "funfake>=1.1.5", "nltfile>=1.0.38", "nltlog>=1.1.6", "nltsecret>=1.4.82", "nlttask>=1.0.3", "requests>=2.28.0", "SQLAlchemy>=2.0.0", "PyMySQL>=1.1.0", "tqdm>=4.67.0",]
+dependencies = [ "dominate>=2.9.1", "fundrive>=2.0.81", "funfake>=1.1.5", "funfile>=1.0.39", "nltlog>=1.1.6", "funsecret>=1.4.84", "nlttask>=1.0.3", "requests>=2.28.0", "SQLAlchemy>=2.0.0", "PyMySQL>=1.1.0", "tqdm>=4.67.0",]
 [[project.authors]]
 name = "牛哥"
 email = "niuliangtao@qq.com"
@@ -60,6 +60,6 @@ ignore = [ "E501",]
 path = "../fundrive"
 editable = true
 
-[tool.uv.sources.nltsecret]
-path = "../nltsecret"
+[tool.uv.sources.funsecret]
+path = "../funsecret"
 editable = true

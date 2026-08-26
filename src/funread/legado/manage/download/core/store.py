@@ -6,8 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from nltfile import funos
-from nltfile.compress import tarfile
+from funfile import funos
+from funfile.compress import tarfile
 from nltlog import getLogger
 from nlttask import Task
 from tqdm import tqdm

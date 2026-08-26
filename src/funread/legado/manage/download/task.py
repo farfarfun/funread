@@ -2,7 +2,7 @@
 
 from typing import Any, Dict
 
-from nltsecret import read_secret
+from funsecret import read_secret
 from nltlog import getLogger
 from nlttask import Task
 

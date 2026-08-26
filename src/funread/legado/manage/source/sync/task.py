@@ -5,7 +5,7 @@ import shutil
 from typing import Any, Dict, List, Optional, Set
 
 from nltlog import getLogger
-from nltsecret import read_secret
+from funsecret import read_secret
 from nlttask import Task
 from tqdm import tqdm
 

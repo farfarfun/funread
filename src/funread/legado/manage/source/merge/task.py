@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 import requests
 from nltlog import getLogger
-from nltsecret import read_secret
+from funsecret import read_secret
 from nlttask import Task
 from tqdm import tqdm
 
@@ -546,7 +546,7 @@ class SourceMergeRunner:
 
     @staticmethod
     def _compute_md5(source: Dict[str, Any]) -> str:
-        from nltsecret import get_md5_str
+        from funsecret import get_md5_str
 
         return get_md5_str(json.dumps(source, sort_keys=True, ensure_ascii=False))
 
