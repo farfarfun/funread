@@ -2,8 +2,8 @@
 
 from typing import Any, Dict
 
-from nltsecret import read_secret
-from nltlog import getLogger
+from funsecret import read_secret
+from farlog import getLogger
 from nlttask import Task
 
 from ..source.check.task import CheckSourceStatusTask

@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import requests
-from nltlog import getLogger
-from nltsecret import read_secret
+from farlog import getLogger
+from funsecret import read_secret
 from nlttask import Task
 from tqdm import tqdm
 

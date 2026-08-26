@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 import json
 import re
 
-from nltlog import getLogger
+from farlog import getLogger
 from nlttask import Task
 
 from ..core.constants import EXPORT_BATCH_SIZE

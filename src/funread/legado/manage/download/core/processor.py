@@ -6,9 +6,9 @@ import traceback
 from typing import Any, Dict, List, Optional, Union
 
 import requests
-from nltfile import pickle
-from nltlog import getLogger
-from nltsecret import get_md5_str
+from funfile import pickle
+from farlog import getLogger
+from funsecret import get_md5_str
 
 from funread.legado.manage.utils import url_to_hostname
 

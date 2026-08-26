@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
-from nltlog import getLogger
-from nltsecret import read_secret
+from farlog import getLogger
+from funsecret import read_secret
 from sqlalchemy import (
     DateTime,
     Integer,

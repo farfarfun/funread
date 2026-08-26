@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 import requests
 from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
-from nltlog import getLogger
+from farlog import getLogger
 from nlttask import Task
 
 logger = getLogger("funread")
