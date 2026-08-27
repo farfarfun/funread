@@ -1,13 +1,15 @@
 """RSS 更新任务模块"""
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import requests
 from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
 from farlog import getLogger
-from nlttask import Task
+from funworker import BaseConsumer, BaseProcessor, Pipeline
+
+from ..utils.worker import ListProducer
 
 logger = getLogger("funread")
 
@@ -16,6 +18,7 @@ CAT_API_URL = "https://api.thecatapi.com/v1/images/search?size=full"
 DEFAULT_TIMEOUT = 10
 REQUEST_RETRIES = 2
 DEFAULT_REPO = "farfarfun/funread-cache"
+DEFAULT_ICON_FETCH_WORKERS = 8
 
 EXTERNAL_SOURCES = [
     {"title": "源仓库(新)", "url": "https://link3.cc/yckceo"},
@@ -26,7 +29,40 @@ EXTERNAL_SOURCES = [
 ]
 
 
-class UpdateRssTask(Task):
+class _BookSourceProcessor(BaseProcessor):
+    """Builds one book-source entry (including its icon fetch) for a directory listing."""
+
+    def __init__(self, task: "UpdateRssTask"):
+        self.task = task
+
+    def process(self, item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+        index, dir_info = item
+        source = {
+            "title": dir_info["name"],
+            "pic": self.task.random_icon(),
+            "url": f"https://farfarfun.github.io/{self.task.repo}/{dir_info['path']}/index.html",
+            "description": dir_info.get("description", "Legado source"),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return index, source
+
+
+class _OrderedResultsConsumer(BaseConsumer):
+    """Collect (index, value) pairs and expose them sorted by original index."""
+
+    def __init__(self, input_queue, **kwargs):
+        super().__init__(input_queue=input_queue, **kwargs)
+        self._results: Dict[int, Any] = {}
+
+    def consume(self, item: Tuple[int, Any]) -> None:
+        index, value = item
+        self._results[index] = value
+
+    def ordered_values(self) -> List[Any]:
+        return [self._results[i] for i in sorted(self._results)]
+
+
+class UpdateRssTask:
     """RSS 更新任务，用于更新订阅源列表"""
 
     def __init__(self, repo: str = DEFAULT_REPO) -> None:
@@ -34,7 +70,6 @@ class UpdateRssTask(Task):
         self.drive.login(repo)
         self.repo = repo
         self.faker = Headers()
-        super(UpdateRssTask, self).__init__()
 
     def random_icon(self, retries: int = REQUEST_RETRIES) -> str:
         for attempt in range(retries):
@@ -72,21 +107,25 @@ class UpdateRssTask(Task):
             raise
 
     def _build_book_sources(self, dir_path: str) -> List[Dict[str, Any]]:
-        sources = []
         try:
-            for dir_info in self.drive.get_dir_list(dir_path):
-                sources.append(
-                    {
-                        "title": dir_info["name"],
-                        "pic": self.random_icon(),
-                        "url": f"https://farfarfun.github.io/{self.repo}/{dir_info['path']}/index.html",
-                        "description": dir_info.get("description", "Legado source"),
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                )
+            dir_list = list(self.drive.get_dir_list(dir_path))
         except Exception as e:
             logger.error(f"Failed to build book sources: {e}")
-        return sources
+            return []
+        if not dir_list:
+            return []
+
+        pipeline = Pipeline.build(
+            producer_cls=ListProducer,
+            processor=_BookSourceProcessor(task=self),
+            consumer_cls=_OrderedResultsConsumer,
+            num_workers=min(DEFAULT_ICON_FETCH_WORKERS, len(dir_list)),
+            producer_kwargs={"items": list(enumerate(dir_list))},
+            processor_name="rss-book-sources",
+        )
+        pipeline.run()
+        pipeline.log_progress()
+        return pipeline.consumer.ordered_values()
 
     def _enrich_external_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for source in sources:

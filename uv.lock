@@ -989,7 +989,6 @@ dependencies = [
     { name = "funfile" },
     { name = "funsecret" },
     { name = "funworker" },
-    { name = "nlttask" },
     { name = "pymysql" },
     { name = "requests" },
     { name = "sqlalchemy" },
@@ -1019,7 +1018,6 @@ requires-dist = [
     { name = "funworker", editable = "../funworker" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "nicegui", marker = "extra == 'web'", specifier = ">=2.0.0" },
-    { name = "nlttask", specifier = ">=1.0.3" },
     { name = "pydantic", marker = "extra == 'web'", specifier = ">=2.0.0" },
     { name = "pymysql", specifier = ">=1.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
@@ -1058,14 +1056,6 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12.5" },
 ]
 provides-extras = ["mysql", "mysqlclient"]
-
-[[package]]
-name = "funshell"
-version = "1.0.19"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/2b/6b8ac073b8465b9a977ec68315b16715c832a533fb71a1cd5f74b410903a/funshell-1.0.19-py3-none-any.whl", hash = "sha256:cae36e8a21218e69e450ce19407301bbf1c11304e93f70f9503a813b006e970c", size = 5726, upload-time = "2026-02-24T13:03:06.65Z" },
-]
 
 [[package]]
 name = "funworker"
@@ -1667,19 +1657,6 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/5a/03c191b427546e1743dfaad81e36569d8bdf4ecf0de39fe12eb8d684091f/nltlog-1.1.6-py3-none-any.whl", hash = "sha256:3d69b26847f88ebf188c71d797fd73a60d249d3224f8b6731fec64e642d3459f", size = 5056, upload-time = "2026-08-03T02:43:02.75Z" },
-]
-
-[[package]]
-name = "nlttask"
-version = "1.0.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "funshell" },
-    { name = "nltlog" },
-    { name = "sqlalchemy" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/81/7d68f68729fac2e6cb155715ea3f1a4c999ce3db7b652156bd89c37dbf18/nlttask-1.0.4-py3-none-any.whl", hash = "sha256:cb085f7ceb58ee625b68c674364742d1f4e6305514f1ddb130c555d91fb078d8", size = 5803, upload-time = "2026-05-26T11:03:47.176Z" },
 ]
 
 [[package]]

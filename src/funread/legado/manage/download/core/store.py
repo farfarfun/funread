@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterator, List, Optional
 from funfile import funos
 from funfile.compress import tarfile
 from farlog import getLogger
-from nlttask import Task
 from tqdm import tqdm
 
 from ...source.storage import SOURCE_STATUS_AVAILABLE, SOURCE_STATUS_PENDING
@@ -19,12 +18,11 @@ from .constants import DEFAULT_BACKUP_ID
 logger = getLogger("funread")
 
 
-class SourceStoreTask(Task):
+class SourceStoreTask:
     """Base class for tasks that operate on a local source store."""
 
-    def __init__(self, store: Optional["LocalSourceStore"] = None, *args, **kwargs):
+    def __init__(self, store: Optional["LocalSourceStore"] = None):
         self.store = store
-        super(SourceStoreTask, self).__init__(*args, **kwargs)
 
 
 class LocalSourceStore:
@@ -345,9 +343,9 @@ class DumpSourceBackupTask(SourceStoreTask):
 class LoadSourceBackupTask(SourceStoreTask):
     """Load local source data from the latest or a given backup archive."""
 
-    def __init__(self, store=None, zip_file: Optional[str] = None, *args, **kwargs):
+    def __init__(self, store=None, zip_file: Optional[str] = None):
         self.zip_file = zip_file
-        super(LoadSourceBackupTask, self).__init__(store=store, *args, **kwargs)
+        super(LoadSourceBackupTask, self).__init__(store=store)
 
     def run(self) -> None:
         if self.store is None:

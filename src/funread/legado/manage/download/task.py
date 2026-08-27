@@ -4,7 +4,6 @@ from typing import Any, Dict
 
 from funsecret import read_secret
 from farlog import getLogger
-from nlttask import Task
 
 from ..source.check.task import CheckSourceStatusTask
 from ..source.merge.task import SourceMergeRunner
@@ -18,7 +17,7 @@ from .reporting.remote import PublishSourceReportTask, UploadSourceBatchesTask
 logger = getLogger("funread")
 
 
-class GenerateSourceTask(Task):
+class GenerateSourceTask:
     """Run the full source build pipeline for a given source type."""
 
     def __init__(
@@ -26,13 +25,10 @@ class GenerateSourceTask(Task):
         dir_path: str = DEFAULT_DIR_PATH,
         source_type: str = "booksource",
         repo: str = DEFAULT_REPO,
-        *args,
-        **kwargs,
     ):
         self.repo_str = repo
         self.dir_path = dir_path
         self.source_type = source_type
-        super(GenerateSourceTask, self).__init__(*args, **kwargs)
 
     @staticmethod
     def get_cache_root() -> str:

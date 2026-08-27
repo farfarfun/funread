@@ -5,7 +5,6 @@ import json
 import re
 
 from farlog import getLogger
-from nlttask import Task
 
 from ..core.constants import EXPORT_BATCH_SIZE
 
@@ -96,13 +95,12 @@ class SourceRemoteManager:
             logger.warning("No exported source batches produced; skip remote cleanup")
 
 
-class UploadSourceBatchesTask(Task):
+class UploadSourceBatchesTask:
     """Upload exported source batches to remote storage."""
 
-    def __init__(self, store=None, remote_manager: SourceRemoteManager = None, *args, **kwargs):
+    def __init__(self, store=None, remote_manager: SourceRemoteManager = None):
         self.store = store
         self.remote_manager = remote_manager
-        super(UploadSourceBatchesTask, self).__init__(*args, **kwargs)
 
     def run(self) -> None:
         if self.store is None:
@@ -120,19 +118,16 @@ class UploadSourceBatchesTask(Task):
             raise
 
 
-class PublishSourceReportTask(Task):
+class PublishSourceReportTask:
     """Generate and publish the HTML report for a source directory."""
 
     def __init__(
         self,
         report_builder=None,
         remote_manager: SourceRemoteManager = None,
-        *args,
-        **kwargs,
     ):
         self.report_builder = report_builder
         self.remote_manager = remote_manager
-        super(PublishSourceReportTask, self).__init__(*args, **kwargs)
 
     def run(self) -> None:
         if self.report_builder is None:
