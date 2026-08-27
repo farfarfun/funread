@@ -5,19 +5,18 @@ import json
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Protocol
 
 import requests
 from farlog import getLogger
 from funsecret import read_secret
-from nlttask import Task
-from tqdm import tqdm
+from funworker import BaseProcessor, Pipeline
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
 from ...download.sources.rss import RSSSourceProcessor
 from ...utils import url_to_hostname
+from ...utils.worker import CounterConsumer, ListProducer
 from ..storage import (
     SOURCE_STATUS_AVAILABLE,
     SOURCE_STATUS_PENDING,
@@ -213,6 +212,17 @@ class OpenAICompatibleSourceMerger:
         )
 
 
+class _MergeFileProcessor(BaseProcessor):
+    """Adapts `SourceMergeRunner.merge_file` to the funworker processor protocol."""
+
+    def __init__(self, runner: "SourceMergeRunner"):
+        self.runner = runner
+
+    def process(self, file_path: str) -> str:
+        logger.info(f"Start merge source file: {file_path}")
+        return self.runner.merge_file(file_path)
+
+
 class SourceMergeRunner:
     """Walk local source files and merge multiple versions back into each file."""
 
@@ -241,21 +251,22 @@ class SourceMergeRunner:
         if total == 0:
             return stats
 
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, total)) as executor:
-            futures = []
-            for file_path in file_paths:
-                logger.info(f"Start merge source file: {file_path}")
-                futures.append(executor.submit(self.merge_file, file_path))
-            for future in tqdm(
-                as_completed(futures), total=total, desc=f"merge-{self.store.cate1}"
-            ):
-                stats["processed"] += 1
-                try:
-                    status = future.result()
-                except Exception as e:
-                    logger.warning(f"Failed to collect source merge result: {e}")
-                    status = "failed"
-                stats[status] += 1
+        pipeline = Pipeline.build(
+            producer_cls=ListProducer,
+            processor=_MergeFileProcessor(self),
+            consumer_cls=CounterConsumer,
+            num_workers=min(self.max_workers, total),
+            producer_kwargs={"items": file_paths},
+            processor_name=f"merge-{self.store.cate1}",
+        )
+        pipeline.run()
+        pipeline.log_progress()
+
+        counts = pipeline.consumer.counts
+        stats["processed"] = sum(counts.values())
+        stats["merged"] = counts.get("merged", 0)
+        stats["skipped"] = counts.get("skipped", 0)
+        stats["failed"] = counts.get("failed", 0)
         return stats
 
     def iter_source_files(self) -> List[str]:
@@ -586,12 +597,11 @@ class SourceMergeRunner:
         )
 
 
-class MergeSourceTask(Task):
+class MergeSourceTask:
     """Run source merge for local source files."""
 
-    def __init__(self, path: Optional[str] = None, *args, **kwargs):
+    def __init__(self, path: Optional[str] = None):
         self.path = path or self._read_cache_root()
-        super(MergeSourceTask, self).__init__(*args, **kwargs)
 
     @staticmethod
     def _read_cache_root() -> str:

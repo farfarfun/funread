@@ -2,16 +2,17 @@
 
 import os
 import shutil
+import threading
 from typing import Any, Dict, List, Optional, Set
 
 from farlog import getLogger
 from funsecret import read_secret
-from nlttask import Task
-from tqdm import tqdm
+from funworker import BaseConsumer, BaseProcessor, Pipeline
 
 from ...download.core.store import LocalSourceStore
 from ...download.sources.book import BookSourceProcessor
 from ...download.sources.rss import RSSSourceProcessor
+from ...utils.worker import ListProducer
 from ..storage import (
     SOURCE_STATUS_PENDING,
     SOURCE_STATUS_UNAVAILABLE,
@@ -27,13 +28,60 @@ from ..storage import (
 
 logger = getLogger("funread")
 
+DEFAULT_SYNC_WORKERS = 8
 
-class SyncLocalSourceRecordsTask(Task):
+
+class _SyncFileProcessor(BaseProcessor):
+    """Adapts per-file sync record building to the funworker processor protocol."""
+
+    def __init__(
+        self,
+        task: "SyncLocalSourceRecordsTask",
+        store: LocalSourceStore,
+        database_url: Optional[str],
+        url_id_map: Dict[str, int],
+    ):
+        self.task = task
+        self.store = store
+        self.database_url = database_url
+        self.url_id_map = url_id_map
+        self.reconcile_lock = threading.Lock()
+
+    def process(self, file_path: str) -> Dict[str, Any]:
+        return self.task._process_file_for_sync(
+            store=self.store,
+            file_path=file_path,
+            database_url=self.database_url,
+            url_id_map=self.url_id_map,
+            reconcile_lock=self.reconcile_lock,
+        )
+
+
+class _SyncRecordsConsumer(BaseConsumer):
+    """Accumulate per-file sync results into detail/index record lists."""
+
+    def __init__(self, input_queue, **kwargs):
+        super().__init__(input_queue=input_queue, **kwargs)
+        self.detail_records: List[Dict[str, Any]] = []
+        self.index_records: List[Dict[str, Any]] = []
+        self._seen_md5: Set[str] = set()
+
+    def consume(self, item: Dict[str, Any]) -> None:
+        if item["detail"] is not None:
+            self.detail_records.append(item["detail"])
+        for payload in item["indexes"]:
+            md5 = payload["md5"]
+            if md5 in self._seen_md5:
+                continue
+            self._seen_md5.add(md5)
+            self.index_records.append(payload)
+
+
+class SyncLocalSourceRecordsTask:
     """Rebuild source detail/index records from local source files."""
 
-    def __init__(self, path: Optional[str] = None, *args, **kwargs):
+    def __init__(self, path: Optional[str] = None):
         self.path = path or self._read_cache_root()
-        super(SyncLocalSourceRecordsTask, self).__init__(*args, **kwargs)
 
     @staticmethod
     def _read_cache_root() -> str:
@@ -212,26 +260,22 @@ class SyncLocalSourceRecordsTask(Task):
         )
         return file_path, updated_data
 
-    def _build_records(self, store: LocalSourceStore) -> Dict[str, Any]:
-        detail_records: List[Dict[str, Any]] = []
-        index_records: List[Dict[str, Any]] = []
-        seen_md5: Set[str] = set()
-        database_url = getattr(store, "database_url", None)
-        file_paths = self._iter_source_files(store)
-        url_id_map = self._build_canonical_url_id_map(
-            store=store,
-            file_paths=file_paths,
-            database_url=database_url,
-        )
+    def _process_file_for_sync(
+        self,
+        store: LocalSourceStore,
+        file_path: str,
+        database_url: Optional[str],
+        url_id_map: Dict[str, int],
+        reconcile_lock: threading.Lock,
+    ) -> Dict[str, Any]:
+        try:
+            data = store._load_json_safely(file_path)
+        except Exception as e:
+            logger.warning(f"Skip invalid source file {file_path}: {e}")
+            return {"detail": None, "indexes": []}
 
-        for file_path in tqdm(file_paths, desc=f"sync-{store.cate1}"):
-            try:
-                data = store._load_json_safely(file_path)
-            except Exception as e:
-                logger.warning(f"Skip invalid source file {file_path}: {e}")
-                continue
-
-            try:
+        try:
+            with reconcile_lock:
                 file_path, data = self._reconcile_file_identity(
                     store=store,
                     file_path=file_path,
@@ -239,42 +283,68 @@ class SyncLocalSourceRecordsTask(Task):
                     database_url=database_url,
                     url_id_map=url_id_map,
                 )
-            except Exception as e:
-                logger.warning(f"Failed to reconcile source file id {file_path}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to reconcile source file id {file_path}: {e}")
 
-            url_id = data.get("url_id")
-            hostname = str(data.get("hostname") or "")
-            if url_id is None or not hostname:
-                continue
+        url_id = data.get("url_id")
+        hostname = str(data.get("hostname") or "")
+        if url_id is None or not hostname:
+            return {"detail": None, "indexes": []}
 
-            detail_records.append(
-                {
-                    "id": int(url_id),
-                    "url": hostname,
-                    "version": self._count_unmerged_versions(data),
-                    "status": self._resolve_status(data),
-                }
-            )
+        detail = {
+            "id": int(url_id),
+            "url": hostname,
+            "version": self._count_unmerged_versions(data),
+            "status": self._resolve_status(data),
+        }
+        indexes = self._build_index_records_for_data(store=store, data=data)
+        return {"detail": detail, "indexes": indexes}
 
-            for payload in self._build_index_records_for_data(store=store, data=data):
-                md5 = payload["md5"]
-                if md5 in seen_md5:
-                    continue
-                seen_md5.add(md5)
-                index_records.append(payload)
+    def _build_records(
+        self, store: LocalSourceStore, max_workers: int = DEFAULT_SYNC_WORKERS
+    ) -> Dict[str, Any]:
+        database_url = getattr(store, "database_url", None)
+        file_paths = self._iter_source_files(store)
+        if not file_paths:
+            return {"detail_records": [], "index_records": []}
 
+        url_id_map = self._build_canonical_url_id_map(
+            store=store,
+            file_paths=file_paths,
+            database_url=database_url,
+        )
+
+        pipeline = Pipeline.build(
+            producer_cls=ListProducer,
+            processor=_SyncFileProcessor(
+                task=self, store=store, database_url=database_url, url_id_map=url_id_map
+            ),
+            consumer_cls=_SyncRecordsConsumer,
+            num_workers=min(max(1, int(max_workers)), len(file_paths)),
+            producer_kwargs={"items": file_paths},
+            processor_name=f"sync-{store.cate1}",
+        )
+        pipeline.run()
+        pipeline.log_progress()
+
+        consumer = pipeline.consumer
         return {
-            "detail_records": detail_records,
-            "index_records": index_records,
+            "detail_records": consumer.detail_records,
+            "index_records": consumer.index_records,
         }
 
-    def run_source(self, source_type: str, database_url: Optional[str] = None) -> Dict[str, int]:
+    def run_source(
+        self,
+        source_type: str,
+        database_url: Optional[str] = None,
+        max_workers: int = DEFAULT_SYNC_WORKERS,
+    ) -> Dict[str, int]:
         with self._create_store(
             self.path,
             source_type=source_type,
             database_url=database_url,
         ) as store:
-            payload = self._build_records(store)
+            payload = self._build_records(store, max_workers=max_workers)
             replace_source_detail_records(
                 records=payload["detail_records"],
                 source_type=store.cate1,
@@ -332,8 +402,12 @@ class SyncLocalSourceRecordsTask(Task):
         )
         return {"details": 1, "indexes": len(index_records)}
 
-    def run_book(self, database_url: Optional[str] = None) -> Dict[str, int]:
-        return self.run_source(source_type="book", database_url=database_url)
+    def run_book(
+        self, database_url: Optional[str] = None, max_workers: int = DEFAULT_SYNC_WORKERS
+    ) -> Dict[str, int]:
+        return self.run_source(source_type="book", database_url=database_url, max_workers=max_workers)
 
-    def run_rss(self, database_url: Optional[str] = None) -> Dict[str, int]:
-        return self.run_source(source_type="rss", database_url=database_url)
+    def run_rss(
+        self, database_url: Optional[str] = None, max_workers: int = DEFAULT_SYNC_WORKERS
+    ) -> Dict[str, int]:
+        return self.run_source(source_type="rss", database_url=database_url, max_workers=max_workers)

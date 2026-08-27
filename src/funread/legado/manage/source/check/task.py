@@ -1,18 +1,17 @@
 """Source availability checking tasks."""
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import requests
 from farlog import getLogger
 from funsecret import read_secret
-from nlttask import Task
-from tqdm import tqdm
+from funworker import BaseProcessor, Pipeline
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
 from ...download.sources.rss import RSSSourceProcessor
+from ...utils.worker import CounterConsumer, ListProducer
 from ..storage import (
     SOURCE_STATUS_AVAILABLE,
     SOURCE_STATUS_PENDING,
@@ -38,6 +37,16 @@ DEFAULT_STATUS_PRIORITY = {
 }
 
 
+class _CheckFileProcessor(BaseProcessor):
+    """Adapts `SourceStatusCheckRunner.check_file` to the funworker processor protocol."""
+
+    def __init__(self, runner: "SourceStatusCheckRunner"):
+        self.runner = runner
+
+    def process(self, file_path: str) -> str:
+        return self.runner.check_file(file_path)
+
+
 class SourceStatusCheckRunner:
     """Check local source files and update availability status."""
 
@@ -60,18 +69,22 @@ class SourceStatusCheckRunner:
         if total == 0:
             return stats
 
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, total)) as executor:
-            futures = [executor.submit(self.check_file, file_path) for file_path in file_paths]
-            for future in tqdm(
-                as_completed(futures), total=total, desc=f"check-{self.store.cate1}"
-            ):
-                stats["processed"] += 1
-                try:
-                    result = future.result()
-                except Exception as e:
-                    logger.warning(f"Failed to collect source check result: {e}")
-                    result = "failed"
-                stats[result] += 1
+        pipeline = Pipeline.build(
+            producer_cls=ListProducer,
+            processor=_CheckFileProcessor(self),
+            consumer_cls=CounterConsumer,
+            num_workers=min(self.max_workers, total),
+            producer_kwargs={"items": file_paths},
+            processor_name=f"check-{self.store.cate1}",
+        )
+        pipeline.run()
+        pipeline.log_progress()
+
+        counts = pipeline.consumer.counts
+        stats["processed"] = sum(counts.values())
+        stats["available"] = counts.get("available", 0)
+        stats["unavailable"] = counts.get("unavailable", 0)
+        stats["failed"] = counts.get("failed", 0)
         return stats
 
     def iter_source_files(self) -> List[str]:
@@ -224,12 +237,11 @@ class SourceStatusCheckRunner:
         )
 
 
-class CheckSourceStatusTask(Task):
+class CheckSourceStatusTask:
     """Run source status checks for a local source store."""
 
-    def __init__(self, path: Optional[str] = None, *args, **kwargs):
+    def __init__(self, path: Optional[str] = None):
         self.path = path or self._read_cache_root()
-        super(CheckSourceStatusTask, self).__init__(*args, **kwargs)
 
     @staticmethod
     def _read_cache_root() -> str:
