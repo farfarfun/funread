@@ -405,9 +405,13 @@ class SyncLocalSourceRecordsTask:
     def run_book(
         self, database_url: Optional[str] = None, max_workers: int = DEFAULT_SYNC_WORKERS
     ) -> Dict[str, int]:
-        return self.run_source(source_type="book", database_url=database_url, max_workers=max_workers)
+        return self.run_source(
+            source_type="book", database_url=database_url, max_workers=max_workers
+        )
 
     def run_rss(
         self, database_url: Optional[str] = None, max_workers: int = DEFAULT_SYNC_WORKERS
     ) -> Dict[str, int]:
-        return self.run_source(source_type="rss", database_url=database_url, max_workers=max_workers)
+        return self.run_source(
+            source_type="rss", database_url=database_url, max_workers=max_workers
+        )
