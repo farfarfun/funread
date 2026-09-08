@@ -30,6 +30,10 @@ build-backend = "hatchling.build"
 [project.optional-dependencies]
 dev = [ "pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0",]
 web = [ "nicegui>=2.0.0", "pydantic>=2.0.0",]
+api = [ "fastapi>=0.110.0", "uvicorn[standard]>=0.27.0",]
+
+[project.scripts]
+funread-api = "funread.api.app:run"
 
 [project.urls]
 Organization = "https://github.com/farfarfun"

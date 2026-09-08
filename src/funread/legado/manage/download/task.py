@@ -5,6 +5,8 @@ from typing import Any, Dict
 from funsecret import read_secret
 from farlog import getLogger
 
+from funread.base.config import resolve_database_url
+
 from ..source.check.task import CheckSourceStatusTask
 from ..source.merge.task import SourceMergeRunner
 from ..source.sync.task import SyncLocalSourceRecordsTask
@@ -44,7 +46,7 @@ class GenerateSourceTask:
     def build_runtime(self, source_type: str) -> Dict[str, Any]:
         context = self.build_context(source_type)
         path = self.get_cache_root()
-        database_url = read_secret(cate1="funread", cate2="cache", cate3="source", cate4="db_url")
+        database_url = resolve_database_url()
         store = context.create_store(path)
         setattr(store, "database_url", database_url)
         return {

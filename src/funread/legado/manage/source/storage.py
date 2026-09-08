@@ -6,7 +6,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from farlog import getLogger
-from funsecret import read_secret
 from sqlalchemy import (
     DateTime,
     Integer,
@@ -15,6 +14,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    event,
     func,
     inspect,
     select,
@@ -22,6 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from funread.base.config import is_sqlite_url, resolve_database_url
 
 logger = getLogger("funread")
 
@@ -118,48 +119,47 @@ def compute_url_md5(url: str) -> str:
 
 
 def _get_database_url(database_url: Optional[str] = None) -> Optional[str]:
-    if database_url:
-        return database_url
+    return database_url or resolve_database_url()
 
-    try:
-        secret_url = read_secret(
-            cate1="funread",
-            cate2="cache",
-            cate3="source",
-            cate4="db_url",
-        )
-        if secret_url:
-            return secret_url
-    except Exception:
-        pass
 
-    return None
+def _tune_sqlite(dbapi_conn: Any, _record: Any) -> None:
+    """Connection-level PRAGMAs for SQLite.
+
+    ``foreign_keys``: SQLite doesn't enforce it by default. ``WAL`` lets the
+    CLI pipeline write while something else reads. ``busy_timeout`` waits out
+    lock contention instead of raising "database is locked" immediately.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
 
 
 def _get_engine(database_url: Optional[str] = None):
     resolved_url = _get_database_url(database_url)
-    if not resolved_url:
-        raise ValueError(
-            "Database URL is not configured in read_secret(funread/cache/source/db_url)."
-        )
     engine = _ENGINE_CACHE.get(resolved_url)
     if engine is None:
         engine = create_engine(resolved_url, future=True)
+        if is_sqlite_url(resolved_url):
+            event.listen(engine, "connect", _tune_sqlite)
         _ENGINE_CACHE[resolved_url] = engine
     return engine
 
 
 def _get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
     resolved_url = _get_database_url(database_url)
-    if not resolved_url:
-        raise ValueError(
-            "Database URL is not configured in read_secret(funread/cache/source/db_url)."
-        )
     factory = _SESSION_FACTORY_CACHE.get(resolved_url)
     if factory is None:
         factory = sessionmaker(bind=_get_engine(resolved_url), expire_on_commit=False, future=True)
         _SESSION_FACTORY_CACHE[resolved_url] = factory
     return factory
+
+
+def get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
+    """Public accessor for the cached session factory (e.g. for the API layer)."""
+    init_source_db(database_url=database_url)
+    return _get_session_factory(database_url=database_url)
 
 
 def init_source_db(database_url: Optional[str] = None) -> None:
