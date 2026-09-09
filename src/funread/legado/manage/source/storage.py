@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import requests
 from farlog import getLogger
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Integer,
     String,
@@ -56,6 +57,12 @@ class SourceListRecord(Base):
     url: Mapped[str] = mapped_column(String(1024), unique=True, index=True, nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    increment_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    increment_stop: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -168,8 +175,31 @@ def init_source_db(database_url: Optional[str] = None) -> None:
         return
     engine = _get_engine(resolved_url)
     _migrate_source_detail_records_table(engine)
+    _migrate_source_list_records_table(engine)
     Base.metadata.create_all(engine)
     _INITIALIZED_DATABASES.add(resolved_url)
+
+
+def _migrate_source_list_records_table(engine: Any) -> None:
+    inspector = inspect(engine)
+    if "source_list_records" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("source_list_records")}
+    additions = {
+        "enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
+        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+        "last_error": "VARCHAR(2048) NULL",
+        "last_success_at": "TIMESTAMP NULL",
+        "increment_start": "INTEGER NULL",
+        "increment_stop": "INTEGER NULL",
+    }
+    with engine.begin() as conn:
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(
+                    text(f"ALTER TABLE source_list_records ADD COLUMN {name} {definition}")
+                )
 
 
 def _migrate_source_detail_records_table(engine: Any) -> None:
@@ -246,7 +276,7 @@ def _migrate_source_detail_records_table(engine: Any) -> None:
         )
 
 
-def _count_source_items(source_data: Any) -> int:
+def count_source_items(source_data: Any) -> int:
     if isinstance(source_data, list):
         return len(source_data)
     if isinstance(source_data, dict):
@@ -258,13 +288,51 @@ def _count_source_items(source_data: Any) -> int:
     return -1
 
 
+def _iter_source_urls(record: SourceListRecord) -> Iterator[str]:
+    start, stop = record.increment_start, record.increment_stop
+    if start is None and stop is None:
+        yield record.url
+        return
+    if start is None or stop is None or start >= stop or "{id}" not in record.url:
+        raise ValueError("incrementing sources require {id} and a valid start/stop range")
+    for source_id in range(start, stop):
+        yield record.url.replace("{id}", str(source_id))
+
+
+def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> List[Any]:
+    """Fetch one list URL, or internally expand one incrementing URL template."""
+    payloads: List[Any] = []
+    failures: List[Exception] = []
+    incremental = record.increment_start is not None or record.increment_stop is not None
+    for url in _iter_source_urls(record):
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            payloads.append(response.json())
+        except Exception as exc:
+            if not incremental:
+                raise
+            failures.append(exc)
+
+    if not payloads:
+        detail = str(failures[-1]) if failures else "no payload returned"
+        raise RuntimeError(f"all incrementing source URLs failed: {detail}")
+    if failures:
+        logger.warning(f"Skipped {len(failures)} failed URLs for {record.url}")
+    return payloads
+
+
+def count_source_payloads(payloads: List[Any]) -> int:
+    return sum(max(0, count_source_items(payload)) for payload in payloads)
+
+
 def _build_source_list_query(
     source_type: Optional[str] = None,
     min_source_count: Optional[int] = None,
     max_source_count: Optional[int] = None,
     queried_before: Optional[datetime] = None,
 ):
-    stmt = select(SourceListRecord)
+    stmt = select(SourceListRecord).where(SourceListRecord.enabled.is_(True))
     if source_type:
         stmt = stmt.where(SourceListRecord.source_type == source_type)
     if min_source_count is not None:
@@ -304,18 +372,18 @@ def iter_source_list_data(
     for record in records:
         queried_at = utcnow()
         try:
-            response = requests.get(record.url, timeout=timeout)
-            response.raise_for_status()
-            source_data = response.json()
-            source_count = _count_source_items(source_data)
+            payloads = fetch_source_list_data(record, timeout=timeout)
+            source_count = count_source_payloads(payloads)
             updated_record = upsert_source_list_record(
                 url=record.url,
                 source_type=record.source_type,
                 source_count=source_count,
                 queried_at=queried_at,
+                fetch_succeeded=True,
                 database_url=database_url,
             )
-            yield updated_record, source_data
+            for source_data in payloads:
+                yield updated_record, source_data
         except Exception as e:
             logger.warning(f"Failed to fetch source list from {record.url}: {e}")
             upsert_source_list_record(
@@ -323,6 +391,8 @@ def iter_source_list_data(
                 source_type=record.source_type,
                 source_count=-1,
                 queried_at=queried_at,
+                fetch_succeeded=False,
+                error=str(e),
                 database_url=database_url,
             )
 
@@ -661,6 +731,8 @@ def add_source_list_url(
     source_type: str,
     source_count: int = -1,
     queried_at: Optional[datetime] = None,
+    increment_start: Optional[int] = None,
+    increment_stop: Optional[int] = None,
     database_url: Optional[str] = None,
 ) -> SourceListRecord:
     """Add or update a source-list URL record with a default unknown count."""
@@ -669,6 +741,8 @@ def add_source_list_url(
         source_type=source_type,
         source_count=source_count,
         queried_at=queried_at,
+        increment_start=increment_start,
+        increment_stop=increment_stop,
         database_url=database_url,
     )
 
@@ -678,12 +752,24 @@ def upsert_source_list_record(
     source_type: str,
     source_count: int,
     queried_at: Optional[datetime] = None,
+    fetch_succeeded: Optional[bool] = None,
+    error: Optional[str] = None,
+    increment_start: Optional[int] = None,
+    increment_stop: Optional[int] = None,
     database_url: Optional[str] = None,
 ) -> SourceListRecord:
     if not url:
         raise ValueError("url is required")
     if not source_type:
         raise ValueError("source_type is required")
+    if increment_start is not None or increment_stop is not None:
+        if (
+            increment_start is None
+            or increment_stop is None
+            or increment_start >= increment_stop
+            or "{id}" not in url
+        ):
+            raise ValueError("incrementing sources require {id} and a valid start/stop range")
 
     queried_at = queried_at or utcnow()
     normalized_count = int(source_count)
@@ -702,12 +788,25 @@ def upsert_source_list_record(
                 source_type=source_type,
                 source_count=normalized_count,
                 last_queried_at=queried_at,
+                increment_start=increment_start,
+                increment_stop=increment_stop,
             )
             session.add(record)
         else:
             record.source_type = source_type
             record.source_count = normalized_count
             record.last_queried_at = queried_at
+            if increment_start is not None:
+                record.increment_start = increment_start
+                record.increment_stop = increment_stop
+
+        if fetch_succeeded is True:
+            record.last_success_at = queried_at
+            record.consecutive_failures = 0
+            record.last_error = None
+        elif fetch_succeeded is False:
+            record.consecutive_failures += 1
+            record.last_error = (error or "采集失败")[:2048]
 
         session.commit()
         session.refresh(record)

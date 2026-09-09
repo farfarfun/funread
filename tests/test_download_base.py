@@ -419,6 +419,7 @@ def test_source_step_tasks_delegate_to_generator() -> None:
 
 def test_generate_source_task_runs_in_order(monkeypatch) -> None:
     calls = []
+    database_url = "sqlite:////tmp/funread-pipeline-test.db"
 
     class _Store:
         pass
@@ -448,6 +449,7 @@ def test_generate_source_task_runs_in_order(monkeypatch) -> None:
         "build_context",
         lambda self, source_type: _Context(),
     )
+    monkeypatch.setattr(generate_task_module, "resolve_database_url", lambda: database_url)
 
     class _BaseStep:
         step_name = ""
@@ -509,7 +511,7 @@ def test_generate_source_task_runs_in_order(monkeypatch) -> None:
         ("download", "_Store"),
         ("merge", "_Store"),
         ("compress", "_Store"),
-        ("sync", "book", "/tmp/cache", None),
+        ("sync", "book", "/tmp/cache", database_url),
         ("upload", "_Store"),
         ("rss", "_ReportBuilder"),
     ]

@@ -1,23 +1,22 @@
 from datetime import UTC, datetime
 
 import requests
-
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from funread.legado.manage.source.storage import (
     SOURCE_STATUS_AVAILABLE,
     SOURCE_STATUS_BLACKLISTED,
-    Base,
     SOURCE_STATUS_PENDING,
-    SourceListRecord,
+    Base,
     SourceDetailRecord,
-    add_source_list_url,
+    SourceListRecord,
     add_source_detail_url,
-    load_source_detail_url_map,
-    list_source_detail_records,
-    iter_source_list_data,
+    add_source_list_url,
     init_source_db,
+    iter_source_list_data,
+    list_source_detail_records,
+    load_source_detail_url_map,
     upsert_source_list_record,
 )
 
@@ -125,6 +124,37 @@ def test_iter_source_list_data_orders_by_last_queried_at_desc(tmp_path, monkeypa
 
     assert rows[0].source_count == 2
     assert rows[1].source_count == 1
+
+
+def test_iter_source_list_data_expands_incrementing_source_internally(tmp_path, monkeypatch):
+    db_url = f"sqlite:///{tmp_path / 'source_increment.db'}"
+    record = add_source_list_url(
+        url="https://example.com/source/{id}.json",
+        source_type="book",
+        increment_start=7,
+        increment_stop=10,
+        database_url=db_url,
+    )
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        if url.endswith("/8.json"):
+            raise requests.ConnectionError("missing")
+        return _FakeResponse({"bookSourceUrl": url})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    items = list(iter_source_list_data(source_type="book", stale_seconds=0, database_url=db_url))
+
+    assert calls == [
+        "https://example.com/source/7.json",
+        "https://example.com/source/8.json",
+        "https://example.com/source/9.json",
+    ]
+    assert len(items) == 2
+    assert {item[0].id for item in items} == {record.id}
+    assert items[-1][0].source_count == 2
 
 
 def test_upsert_source_detail_record(tmp_path):
@@ -256,6 +286,30 @@ def test_iter_source_list_data_skips_recent_records_by_default(tmp_path, monkeyp
     assert items == []
 
 
+def test_iter_source_list_data_skips_disabled_records(tmp_path, monkeypatch):
+    db_url = f"sqlite:///{tmp_path / 'source_disabled.db'}"
+    record = add_source_list_url(
+        url="https://example.com/disabled.json",
+        source_type="rss",
+        queried_at=datetime(2000, 1, 1),
+        database_url=db_url,
+    )
+    with Session(create_engine(db_url, future=True)) as session:
+        stored = session.get(SourceListRecord, record.id)
+        assert stored is not None
+        stored.enabled = False
+        session.commit()
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("should not fetch disabled record")
+        ),
+    )
+
+    assert list(iter_source_list_data(source_type="rss", database_url=db_url)) == []
+
+
 def test_init_source_db_migrates_old_source_detail_table(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'source_migrate.db'}"
     engine = create_engine(db_url, future=True)
@@ -305,3 +359,53 @@ def test_init_source_db_migrates_old_source_detail_table(tmp_path):
     assert row.url == "books.example.com"
     assert row.version == 2
     assert row.status == SOURCE_STATUS_PENDING
+
+
+def test_init_source_db_adds_source_list_management_columns(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'source_list_migrate.db'}"
+    engine = create_engine(db_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE source_list_records (
+                    id INTEGER PRIMARY KEY,
+                    url VARCHAR(1024) NOT NULL UNIQUE,
+                    source_type VARCHAR(32) NOT NULL,
+                    source_count INTEGER NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    last_queried_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO source_list_records
+                    (id, url, source_type, source_count, created_at, updated_at, last_queried_at)
+                VALUES
+                    (1, 'https://example.com/books.json', 'book', 10,
+                     '2024-01-01 00:00:00', '2024-01-01 00:00:00', '2024-01-01 00:00:00')
+                """
+            )
+        )
+
+    init_source_db(database_url=db_url)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("source_list_records")}
+    with Session(engine) as session:
+        row = session.get(SourceListRecord, 1)
+
+    assert {
+        "enabled",
+        "consecutive_failures",
+        "last_error",
+        "last_success_at",
+        "increment_start",
+        "increment_stop",
+    } <= columns
+    assert row is not None
+    assert row.enabled is True
+    assert row.consecutive_failures == 0

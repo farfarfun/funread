@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
-from starlette.middleware.cors import CORSMiddleware
 
 from funread.api.v1 import api_router
 from funread.legado.manage.source.storage import init_source_db
@@ -24,16 +23,8 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="funread",
         version="0.1.0",
-        description="Read-only API over funread's collected source data",
+        description="Manage funread's source-list collection",
         lifespan=lifespan,
-    )
-    # Dev/test scope only: the web frontend runs on a different origin
-    # (Vite dev server) and this API has no auth to protect anyway.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET"],
-        allow_headers=["*"],
     )
     app.include_router(api_router, prefix="/api/v1")
 
@@ -50,7 +41,7 @@ app = create_app()
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("funread.api.app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("funread.api.app:app", host="127.0.0.1", port=18811)
 
 
 if __name__ == "__main__":
