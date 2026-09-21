@@ -2,7 +2,7 @@
 
 import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Iterator, Optional
 
 import requests
 from farlog import getLogger
@@ -106,8 +106,8 @@ class SourceIndexRecord(Base):
     )
 
 
-_ENGINE_CACHE: Dict[str, Any] = {}
-_SESSION_FACTORY_CACHE: Dict[str, sessionmaker] = {}
+_ENGINE_CACHE: dict[str, Any] = {}
+_SESSION_FACTORY_CACHE: dict[str, sessionmaker] = {}
 _INITIALIZED_DATABASES = set()
 SOURCE_DETAIL_ID_START = 10_000_000
 
@@ -256,7 +256,8 @@ def _migrate_source_detail_records_table(engine: Any) -> None:
                     INSERT INTO source_detail_records_migrating
                         (source_type, url_md5, url, id, version, status, created_at, updated_at)
                     VALUES
-                        (:source_type, :url_md5, :url, :id, :version, :status, :created_at, :updated_at)
+                        (:source_type, :url_md5, :url, :id, :version, :status,
+                         :created_at, :updated_at)
                     """
                 ),
                 {
@@ -299,10 +300,10 @@ def _iter_source_urls(record: SourceListRecord) -> Iterator[str]:
         yield record.url.replace("{id}", str(source_id))
 
 
-def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> List[Any]:
+def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> list[Any]:
     """Fetch one list URL, or internally expand one incrementing URL template."""
-    payloads: List[Any] = []
-    failures: List[Exception] = []
+    payloads: list[Any] = []
+    failures: list[Exception] = []
     incremental = record.increment_start is not None or record.increment_stop is not None
     for url in _iter_source_urls(record):
         try:
@@ -322,7 +323,7 @@ def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> List[
     return payloads
 
 
-def count_source_payloads(payloads: List[Any]) -> int:
+def count_source_payloads(payloads: list[Any]) -> int:
     return sum(max(0, count_source_items(payload)) for payload in payloads)
 
 
@@ -352,7 +353,7 @@ def iter_source_list_data(
     limit: Optional[int] = None,
     timeout: int = 30,
     database_url: Optional[str] = None,
-) -> Iterator[Tuple[SourceListRecord, Any]]:
+) -> Iterator[tuple[SourceListRecord, Any]]:
     """Yield updated source-list records and payloads for stale URLs ordered by last query time."""
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
@@ -367,7 +368,7 @@ def iter_source_list_data(
         )
         if limit is not None:
             stmt = stmt.limit(limit)
-        records: List[SourceListRecord] = session.execute(stmt).scalars().all()
+        records: list[SourceListRecord] = session.execute(stmt).scalars().all()
 
     for record in records:
         queried_at = utcnow()
@@ -399,9 +400,9 @@ def iter_source_list_data(
 
 def list_source_detail_records(
     source_type: Optional[str] = None,
-    statuses: Optional[List[int]] = None,
+    statuses: Optional[list[int]] = None,
     database_url: Optional[str] = None,
-) -> List[SourceDetailRecord]:
+) -> list[SourceDetailRecord]:
     """List source-detail records ordered by id."""
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
@@ -422,7 +423,7 @@ def list_source_detail_records(
 def load_source_index_map(
     source_type: Optional[str] = None,
     database_url: Optional[str] = None,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Load md5 index metadata from source-index records."""
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
@@ -446,7 +447,7 @@ def load_source_index_map(
 
 
 def upsert_source_index_records(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     source_type: str,
     database_url: Optional[str] = None,
 ) -> None:
@@ -502,7 +503,7 @@ def upsert_source_index_records(
 
 
 def replace_source_index_records(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     source_type: str,
     database_url: Optional[str] = None,
 ) -> None:
@@ -537,7 +538,7 @@ def replace_source_index_records(
 
 
 def replace_source_index_records_for_url(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     source_type: str,
     url_id: int,
     database_url: Optional[str] = None,
@@ -576,7 +577,7 @@ def replace_source_index_records_for_url(
 
 
 def replace_source_detail_records(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     source_type: str,
     database_url: Optional[str] = None,
 ) -> None:
@@ -614,7 +615,7 @@ def replace_source_detail_records(
 def load_source_detail_url_map(
     source_type: Optional[str] = None,
     database_url: Optional[str] = None,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Load URL to id mapping from source-detail records."""
     return {
         record.url: record.id
@@ -625,7 +626,7 @@ def load_source_detail_url_map(
 def load_source_detail_status_map(
     source_type: Optional[str] = None,
     database_url: Optional[str] = None,
-) -> Dict[int, int]:
+) -> dict[int, int]:
     """Load source-detail status keyed by source id."""
     return {
         record.id: record.status

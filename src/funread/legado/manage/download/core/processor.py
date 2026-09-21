@@ -1,13 +1,13 @@
-"""Source processing primitives."""
+"""书源处理基础能力。"""
 
 import json
 import os
 import traceback
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional
 
 import requests
-from funfile import pickle
 from farlog import getLogger
+from funfile import pickle
 from funsecret import get_md5_str
 
 from funread.legado.manage.utils import url_to_hostname
@@ -15,17 +15,16 @@ from funread.legado.manage.utils import url_to_hostname
 from .constants import REQUEST_TIMEOUT
 from .store import LocalSourceStore
 
-
 logger = getLogger("funread")
 
 
 class SourceProcessor(LocalSourceStore):
-    """Fetch, normalize and write source items into local storage."""
+    """获取、规范化并写入书源数据。"""
 
     def loader(self) -> None:
         raise NotImplementedError("Subclass must implement loader() method")
 
-    def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
+    def source_format(self, source: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError("Subclass must implement source_format() method")
 
     def persist_download_record(self, url: str, source_data: Any) -> None:
@@ -60,7 +59,7 @@ class SourceProcessor(LocalSourceStore):
             logger.warning(f"Failed to persist download record for {url}: {e}")
 
     @staticmethod
-    def compute_source_md5(source: Dict[str, Any]) -> str:
+    def compute_source_md5(source: dict[str, Any]) -> str:
         return get_md5_str(json.dumps(source, sort_keys=True, ensure_ascii=False))
 
     def url_index(self, url: str) -> int:
@@ -81,7 +80,7 @@ class SourceProcessor(LocalSourceStore):
         self.current_id = max(self.current_id, record.id)
         return record.id
 
-    def add_source(self, source: Dict[str, Any], *args, **kwargs) -> bool:
+    def add_source(self, source: dict[str, Any], *args, **kwargs) -> bool:
         source_url_key = self.get_source_url_key()
         if source is None or len(source) == 0 or source_url_key not in source:
             return False
@@ -122,7 +121,7 @@ class SourceProcessor(LocalSourceStore):
             return False
 
     def add_sources(
-        self, data: Union[str, List[Dict[str, Any]], Dict[str, Any]], *args, **kwargs
+        self, data: str | list[dict[str, Any]] | dict[str, Any], *args, **kwargs
     ) -> int:
         parsed_data = self._parse_input_data(data)
         if parsed_data is None:
@@ -134,7 +133,7 @@ class SourceProcessor(LocalSourceStore):
             return 0
         return sum(1 for source in parsed_data if self.add_source(source, *args, **kwargs))
 
-    def _parse_input_data(self, data: Union[str, Dict, List]) -> Optional[Union[Dict, List]]:
+    def _parse_input_data(self, data: str | dict | list) -> Optional[dict | list]:
         if isinstance(data, str):
             return self._parse_string_data(data)
         if isinstance(data, (dict, list)):
@@ -142,7 +141,7 @@ class SourceProcessor(LocalSourceStore):
         logger.error(f"Invalid data type: {type(data)}")
         return None
 
-    def _parse_string_data(self, data: str) -> Optional[Union[Dict, List]]:
+    def _parse_string_data(self, data: str) -> Optional[dict | list]:
         if data.startswith(("http://", "https://")):
             return self._fetch_from_url(data)
         if os.path.exists(data):
@@ -156,7 +155,7 @@ class SourceProcessor(LocalSourceStore):
         logger.error(f"Invalid data format: {data[:100]}")
         return None
 
-    def _fetch_from_url(self, url: str) -> Optional[Union[Dict, List]]:
+    def _fetch_from_url(self, url: str) -> Optional[dict | list]:
         try:
             response = requests.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -172,7 +171,7 @@ class SourceProcessor(LocalSourceStore):
             logger.error(f"Failed to parse JSON from URL {url}: {e}")
             return None
 
-    def _load_from_file(self, file_path: str) -> Optional[Union[Dict, List]]:
+    def _load_from_file(self, file_path: str) -> Optional[dict | list]:
         try:
             if file_path.endswith(".pkl") or file_path.endswith(".pkl.bz2"):
                 logger.warning("Pickle format is deprecated, use JSON instead")

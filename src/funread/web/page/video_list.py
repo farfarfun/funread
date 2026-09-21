@@ -1,8 +1,12 @@
-from funread.web.parse.video import ParseVideo
-
+from farlog import getLogger
 from nicegui import ui
 from nicegui.events import ValueChangeEventArguments
-from .video import video_page, VideoInfo
+
+from funread.web.parse.video import ParseVideo
+
+from .video import VideoInfo, video_page
+
+logger = getLogger("funread")
 
 
 def show(event: ValueChangeEventArguments):
@@ -37,7 +41,7 @@ def video_list_page(parse: ParseVideo, tab_id=0):
 def video_list_play(parse: ParseVideo, tab_id=0, rows=10, cols=2):
     ui.button("Button", on_click=lambda: ui.notify("Click"))
     videos = parse.parse_video_list()
-    print(videos)
+    logger.debug("视频列表已加载，共 {} 项", len(videos.video_list))
     index = 0
     for i in range(rows):
         with ui.row():

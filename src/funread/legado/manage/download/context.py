@@ -1,6 +1,6 @@
 """Runtime context for source download tasks."""
 
-from typing import Any, Dict, List
+from typing import Any
 
 from fundrive.drives.github import GithubDrive
 
@@ -22,7 +22,7 @@ class SourceBuildContext:
         self.dir_path = dir_path
         self.source_type = source_type
         self.drive = GithubDrive()
-        self._source_count_cache: Dict[str, str] = {}
+        self._source_count_cache: dict[str, str] = {}
         self.report_builder = SourceReportBuilder(self)
         self.remote_manager = SourceRemoteManager(
             context=self,
@@ -54,7 +54,7 @@ class SourceBuildContext:
     def format_file_size(self, size: Any) -> str:
         return self._get_report_builder().format_file_size(size)
 
-    def extract_source_count(self, file: Dict[str, Any]) -> str:
+    def extract_source_count(self, file: dict[str, Any]) -> str:
         return self._get_report_builder().extract_source_count(file)
 
     def generate_table(self) -> None:
@@ -63,10 +63,10 @@ class SourceBuildContext:
     def generate_html_report(self) -> str:
         return self._get_report_builder().generate_html_report()
 
-    def upload_single_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
+    def upload_single_batch(self, data: list[dict[str, Any]], counter: int) -> None:
         self.remote_manager.upload_single_batch(data, counter)
 
-    def upload_batch(self, data: List[Dict[str, Any]], counter: int) -> int:
+    def upload_batch(self, data: list[dict[str, Any]], counter: int) -> int:
         return self.remote_manager.upload_batch(data, counter)
 
     def cleanup_stale_remote_batches(self, next_counter: int) -> None:

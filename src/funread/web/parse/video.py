@@ -21,7 +21,9 @@ class ParseVideo(BaseParse):
         super().__init__(*args, **kwargs)
 
     def parse_video_detail(self) -> VideoInfo:
-        pass
+        """解析视频详情，具体实现由站点解析器提供。"""
+        raise NotImplementedError("子类必须实现 parse_video_detail")
 
     def parse_video_list(self) -> VideoListInfo:
-        pass
+        """解析视频列表，具体实现由站点解析器提供。"""
+        raise NotImplementedError("子类必须实现 parse_video_list")

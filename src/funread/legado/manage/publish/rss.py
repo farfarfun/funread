@@ -1,12 +1,12 @@
 """RSS 更新任务模块"""
 
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import requests
+from farlog import getLogger
 from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
-from farlog import getLogger
 from funworker import BaseConsumer, BaseProcessor, Pipeline
 
 from ..utils.worker import ListProducer
@@ -30,12 +30,12 @@ EXTERNAL_SOURCES = [
 
 
 class _BookSourceProcessor(BaseProcessor):
-    """Builds one book-source entry (including its icon fetch) for a directory listing."""
+    """为目录列表构建一条书源记录并获取图标。"""
 
     def __init__(self, task: "UpdateRssTask"):
         self.task = task
 
-    def process(self, item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+    def process(self, item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
         index, dir_info = item
         source = {
             "title": dir_info["name"],
@@ -48,17 +48,17 @@ class _BookSourceProcessor(BaseProcessor):
 
 
 class _OrderedResultsConsumer(BaseConsumer):
-    """Collect (index, value) pairs and expose them sorted by original index."""
+    """收集带索引的结果，并按原始索引顺序提供。"""
 
     def __init__(self, input_queue, **kwargs):
         super().__init__(input_queue=input_queue, **kwargs)
-        self._results: Dict[int, Any] = {}
+        self._results: dict[int, Any] = {}
 
-    def consume(self, item: Tuple[int, Any]) -> None:
+    def consume(self, item: tuple[int, Any]) -> None:
         index, value = item
         self._results[index] = value
 
-    def ordered_values(self) -> List[Any]:
+    def ordered_values(self) -> list[Any]:
         return [self._results[i] for i in sorted(self._results)]
 
 
@@ -106,7 +106,7 @@ class UpdateRssTask:
             logger.error(f"Failed to update book sources: {e}")
             raise
 
-    def _build_book_sources(self, dir_path: str) -> List[Dict[str, Any]]:
+    def _build_book_sources(self, dir_path: str) -> list[dict[str, Any]]:
         try:
             dir_list = list(self.drive.get_dir_list(dir_path))
         except Exception as e:
@@ -127,7 +127,7 @@ class UpdateRssTask:
         pipeline.log_progress()
         return pipeline.consumer.ordered_values()
 
-    def _enrich_external_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _enrich_external_sources(self, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for source in sources:
             if "pic" not in source:
                 source["pic"] = self.random_icon()
@@ -147,13 +147,13 @@ class UpdateRssTask:
             logger.error(f"Failed to update main RSS: {e}")
             raise
 
-    def _build_rss_urls(self) -> Dict[str, str]:
+    def _build_rss_urls(self) -> dict[str, str]:
         return {
             "源": f"https://gitee.com/{self.repo}/raw/master/funread/legado/snapshot/lasted/source.json",
             "源(备)": f"https://github.com/{self.repo}/raw/master/funread/legado/snapshot/lasted/source.json",
         }
 
-    def _build_main_rss_config(self, rss_urls: Dict[str, str]) -> List[Dict[str, Any]]:
+    def _build_main_rss_config(self, rss_urls: dict[str, str]) -> list[dict[str, Any]]:
         return [
             {
                 "lastUpdateTime": int(datetime.now().timestamp()),
