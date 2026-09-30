@@ -41,8 +41,8 @@ def resolve_database_url() -> str:
         from funsecret import read_secret
 
         value = read_secret(cate1="funread", cate2="cache", cate3="source", cate4="db_url")
-    except Exception as exc:
-        logger.debug(f"Failed to read funread/cache/source/db_url from funsecret: {exc}")
+    except (ImportError, KeyError, ValueError) as exc:
+        logger.debug(f"未配置 funread/cache/source/db_url，使用本地数据库: {exc}")
         value = None
 
     if value:

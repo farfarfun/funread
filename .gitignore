@@ -115,6 +115,12 @@ dmypy.json
 .pyre/
 *.db
 *.accdb
+.run/
+logs/
+.idea/
+.vscode/
+*.rar
+node_modules/
 
 # ---- AI 编码助手 ----
 # 只忽略本地状态；团队有意共享的 agent / 命令 / 规则定义仍然版本化。

@@ -9,19 +9,19 @@ from .video import VideoInfo, video_page
 logger = getLogger("funread")
 
 
-def show(event: ValueChangeEventArguments):
+def show(event: ValueChangeEventArguments) -> None:
     name = type(event.sender).__name__
     ui.notify(f"{name}: {event.value}")
 
 
-def card(video: VideoInfo):
+def card(video: VideoInfo) -> None:
     with ui.card():
         ui.image(video.pic_url)
         with ui.row():
             ui.link(video.text, video_page(video))
 
 
-def video_list_page(parse: ParseVideo, tab_id=0):
+def video_list_page(parse: ParseVideo, tab_id: int = 0):
     @ui.page("/videos")
     def video_list_play(rows=10, cols=2):
         ui.button("Button", on_click=lambda: ui.notify("Click"))
@@ -38,7 +38,9 @@ def video_list_page(parse: ParseVideo, tab_id=0):
     return video_list_play
 
 
-def video_list_play(parse: ParseVideo, tab_id=0, rows=10, cols=2):
+def video_list_play(
+    parse: ParseVideo, tab_id: int = 0, rows: int = 10, cols: int = 2
+) -> None:
     ui.button("Button", on_click=lambda: ui.notify("Click"))
     videos = parse.parse_video_list()
     logger.debug("视频列表已加载，共 {} 项", len(videos.video_list))
@@ -51,7 +53,7 @@ def video_list_play(parse: ParseVideo, tab_id=0, rows=10, cols=2):
                 card(videos.video_list[index])
 
 
-def video_list_tabs_page(parse: ParseVideo, tab_id=0):
+def video_list_tabs_page(parse: ParseVideo, tab_id: int = 0):
     @ui.page("/videosssss")
     def video_list_tabs_play(rows=10, cols=2):
         parse_tabs = parse.tabs()
@@ -68,4 +70,10 @@ def video_list_tabs_page(parse: ParseVideo, tab_id=0):
     return video_list_tabs_play
 
 
-ui.run()
+def run() -> None:
+    """启动 NiceGUI 视频列表开发服务。"""
+    ui.run()
+
+
+if __name__ == "__main__":
+    run()

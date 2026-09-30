@@ -1,4 +1,5 @@
 import funsecret
+import pytest
 
 import funread.base.config as config
 
@@ -21,10 +22,20 @@ def test_database_url_falls_back_to_local_sqlite(monkeypatch, tmp_path):
     database_path = tmp_path / "cache" / "funread.db"
     monkeypatch.delenv("FUNREAD_DATABASE_URL", raising=False)
     monkeypatch.setattr(
-        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError())
+        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(KeyError())
     )
     monkeypatch.setattr(config, "DEFAULT_DATABASE_PATH", database_path)
     monkeypatch.setattr(config, "DEFAULT_DATABASE_URL", f"sqlite:///{database_path}")
 
     assert config.resolve_database_url() == f"sqlite:///{database_path}"
     assert database_path.parent.is_dir()
+
+
+def test_database_url_propagates_secret_system_failure(monkeypatch):
+    monkeypatch.delenv("FUNREAD_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("broken"))
+    )
+
+    with pytest.raises(RuntimeError, match="broken"):
+        config.resolve_database_url()
