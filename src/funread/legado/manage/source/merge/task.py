@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Protocol
 
 import requests
 from farlog import getLogger
@@ -43,12 +43,12 @@ class SourceMerger(Protocol):
         self,
         source_type: str,
         hostname: str,
-        versions: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        versions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """Merge multiple versions into one final source object."""
 
 
-VersionItem = Dict[str, Any]
+VersionItem = dict[str, Any]
 
 
 class OpenAICompatibleSourceMerger:
@@ -56,9 +56,9 @@ class OpenAICompatibleSourceMerger:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = DEFAULT_LLM_MAX_RETRIES,
         retry_sleep_seconds: int = DEFAULT_LLM_RETRY_SLEEP_SECONDS,
@@ -77,7 +77,7 @@ class OpenAICompatibleSourceMerger:
         self.retry_sleep_seconds = max(0, retry_sleep_seconds)
 
     @staticmethod
-    def _extract_json_object(content: str) -> Dict[str, Any]:
+    def _extract_json_object(content: str) -> dict[str, Any]:
         text = content.strip()
         if text.startswith("```"):
             match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
@@ -90,7 +90,9 @@ class OpenAICompatibleSourceMerger:
         return json.loads(text[start : end + 1])
 
     @staticmethod
-    def _build_prompt(source_type: str, hostname: str, versions: List[Dict[str, Any]]) -> str:
+    def _build_prompt(
+        source_type: str, hostname: str, versions: list[dict[str, Any]]
+    ) -> str:
         versions_json = json.dumps(versions, ensure_ascii=False, separators=(",", ":"))
         return (
             "你是一个阅读源合并器。"
@@ -108,7 +110,7 @@ class OpenAICompatibleSourceMerger:
             f"原始版本如下：\n{versions_json}"
         )
 
-    def _post_and_collect_content(self, payload: Dict[str, Any]) -> str:
+    def _post_and_collect_content(self, payload: dict[str, Any]) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -156,8 +158,8 @@ class OpenAICompatibleSourceMerger:
         self,
         source_type: str,
         hostname: str,
-        versions: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        versions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         if not self.api_key:
             raise ValueError("LLM merge api key is not configured")
         payload = {
@@ -172,7 +174,7 @@ class OpenAICompatibleSourceMerger:
             ],
             "response_format": {"type": "json_object"},
         }
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 try:
@@ -229,7 +231,7 @@ class SourceMergeRunner:
     def __init__(
         self,
         store: SourceProcessor,
-        merger: Optional[SourceMerger] = None,
+        merger: SourceMerger | None = None,
         min_versions: int = 2,
         max_versions_per_merge: int = DEFAULT_MAX_VERSIONS_PER_MERGE,
         max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
@@ -242,7 +244,7 @@ class SourceMergeRunner:
         self.max_prompt_chars = max_prompt_chars
         self.max_workers = max(1, int(max_workers))
 
-    def run(self, limit: Optional[int] = None) -> Dict[str, int]:
+    def run(self, limit: int | None = None) -> dict[str, int]:
         stats = {"processed": 0, "merged": 0, "skipped": 0, "failed": 0}
         file_paths = self.iter_source_files()
         if limit is not None:
@@ -269,8 +271,8 @@ class SourceMergeRunner:
         stats["failed"] = counts.get("failed", 0)
         return stats
 
-    def iter_source_files(self) -> List[str]:
-        file_list: List[tuple[int, str]] = []
+    def iter_source_files(self) -> list[str]:
+        file_list: list[tuple[int, str]] = []
         allowed_statuses = {SOURCE_STATUS_PENDING, SOURCE_STATUS_AVAILABLE}
         status_map = self._load_status_map()
         if not os.path.exists(self.store.path_bok):
@@ -295,7 +297,7 @@ class SourceMergeRunner:
         file_list.sort(key=lambda item: (item[0], item[1]))
         return [file_path for _, file_path in file_list]
 
-    def _load_status_map(self) -> Dict[int, int]:
+    def _load_status_map(self) -> dict[int, int]:
         database_url = getattr(self.store, "database_url", None)
         if not database_url:
             return {}
@@ -309,7 +311,7 @@ class SourceMergeRunner:
             return {}
 
     @staticmethod
-    def _extract_url_id_from_path(file_path: str) -> Optional[int]:
+    def _extract_url_id_from_path(file_path: str) -> int | None:
         name = os.path.splitext(os.path.basename(file_path))[0]
         return int(name) if name.isdigit() else None
 
@@ -361,8 +363,8 @@ class SourceMergeRunner:
             logger.warning(f"Failed to merge source file {file_path}: {e}")
             return "failed"
 
-    def _collect_version_items(self, data: Dict[str, Any]) -> List[VersionItem]:
-        version_items: List[VersionItem] = []
+    def _collect_version_items(self, data: dict[str, Any]) -> list[VersionItem]:
+        version_items: list[VersionItem] = []
         for key in ("merged", "candidate"):
             items = data.get(key, [])
             if not isinstance(items, list):
@@ -379,7 +381,7 @@ class SourceMergeRunner:
                     )
         return version_items
 
-    def _collect_versions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _collect_versions(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         return [item["source"] for item in self._collect_version_items(data)]
 
     def _read_version_count(self, file_path: str) -> int:
@@ -389,12 +391,14 @@ class SourceMergeRunner:
             return 0
         return len(self._collect_version_items(data))
 
-    def _estimate_version_items_size(self, version_items: List[VersionItem]) -> int:
+    def _estimate_version_items_size(self, version_items: list[VersionItem]) -> int:
         return len(json.dumps([item["source"] for item in version_items], ensure_ascii=False))
 
-    def _split_version_items(self, version_items: List[VersionItem]) -> List[List[VersionItem]]:
-        chunks: List[List[VersionItem]] = []
-        current: List[VersionItem] = []
+    def _split_version_items(
+        self, version_items: list[VersionItem]
+    ) -> list[list[VersionItem]]:
+        chunks: list[list[VersionItem]] = []
+        current: list[VersionItem] = []
         current_size = 0
         for version_item in version_items:
             version_size = len(json.dumps(version_item["source"], ensure_ascii=False))
@@ -413,10 +417,10 @@ class SourceMergeRunner:
         return chunks
 
     def _group_version_items_by_count(
-        self, version_items: List[VersionItem]
-    ) -> List[List[VersionItem]]:
+        self, version_items: list[VersionItem]
+    ) -> list[list[VersionItem]]:
         group_size = max(2, self.max_versions_per_merge)
-        grouped_chunks: List[List[VersionItem]] = []
+        grouped_chunks: list[list[VersionItem]] = []
         for start in range(0, len(version_items), group_size):
             grouped_chunks.append(copy.deepcopy(version_items[start : start + group_size]))
         return grouped_chunks
@@ -424,9 +428,9 @@ class SourceMergeRunner:
     def _merge_version_items_progressively(
         self,
         file_path: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         hostname: str,
-        version_items: List[VersionItem],
+        version_items: list[VersionItem],
     ) -> VersionItem:
         if len(version_items) < self.min_versions:
             raise ValueError("Not enough versions to merge")
@@ -459,7 +463,7 @@ class SourceMergeRunner:
             "Split merge source into chunks: "
             f"hostname={hostname}, versions={len(version_items)}, chunks={len(chunks)}"
         )
-        merged_chunks: List[VersionItem] = []
+        merged_chunks: list[VersionItem] = []
         for index, chunk in enumerate(chunks, start=1):
             if len(chunk) == 1:
                 logger.info(
@@ -513,11 +517,11 @@ class SourceMergeRunner:
     def _save_merge_checkpoint(
         self,
         file_path: str,
-        data: Dict[str, Any],
-        processed_items: List[VersionItem],
-        remaining_chunks: List[List[VersionItem]],
+        data: dict[str, Any],
+        processed_items: list[VersionItem],
+        remaining_chunks: list[list[VersionItem]],
     ) -> None:
-        remaining_items: List[VersionItem] = []
+        remaining_items: list[VersionItem] = []
         for chunk in remaining_chunks:
             remaining_items.extend(copy.deepcopy(chunk))
         checkpoint_data = copy.deepcopy(data)
@@ -526,8 +530,8 @@ class SourceMergeRunner:
         self.store._save_json_safely(file_path, checkpoint_data)
 
     def _build_merged_md5_list_from_items(
-        self, version_items: List[VersionItem], merged_source: Dict[str, Any]
-    ) -> List[str]:
+        self, version_items: list[VersionItem], merged_source: dict[str, Any]
+    ) -> list[str]:
         merged_md5 = self._compute_md5(merged_source)
         seen = {merged_md5}
         md5_list = [merged_md5]
@@ -539,8 +543,8 @@ class SourceMergeRunner:
         return md5_list
 
     def _build_merged_md5_list(
-        self, data: Dict[str, Any], merged_source: Dict[str, Any]
-    ) -> List[str]:
+        self, data: dict[str, Any], merged_source: dict[str, Any]
+    ) -> list[str]:
         merged_md5 = self._compute_md5(merged_source)
         seen = {merged_md5}
         md5_list = [merged_md5]
@@ -556,14 +560,14 @@ class SourceMergeRunner:
         return md5_list
 
     @staticmethod
-    def _compute_md5(source: Dict[str, Any]) -> str:
+    def _compute_md5(source: dict[str, Any]) -> str:
         from funsecret import get_md5_str
 
         return get_md5_str(json.dumps(source, sort_keys=True, ensure_ascii=False))
 
     def _validate_merged_source(
-        self, source: Dict[str, Any], expected_hostname: str
-    ) -> Dict[str, Any]:
+        self, source: dict[str, Any], expected_hostname: str
+    ) -> dict[str, Any]:
         if not isinstance(source, dict):
             raise ValueError("Merged source must be a dict")
         normalized = self.store.source_format(copy.deepcopy(source))
@@ -581,7 +585,7 @@ class SourceMergeRunner:
         json.dumps(normalized, ensure_ascii=False)
         return normalized
 
-    def _sync_database_record(self, file_path: str, status: Optional[int] = None) -> None:
+    def _sync_database_record(self, file_path: str, status: int | None = None) -> None:
         database_url = getattr(self.store, "database_url", None)
         if not database_url:
             return
@@ -600,7 +604,7 @@ class SourceMergeRunner:
 class MergeSourceTask:
     """Run source merge for local source files."""
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path or self._read_cache_root()
 
     @staticmethod
@@ -609,7 +613,7 @@ class MergeSourceTask:
 
     @staticmethod
     def _create_store(
-        path: str, source_type: str, database_url: Optional[str] = None
+        path: str, source_type: str, database_url: str | None = None
     ) -> SourceProcessor:
         if source_type == "book":
             return BookSourceProcessor(path=path, cate1="book", database_url=database_url)
@@ -620,10 +624,10 @@ class MergeSourceTask:
     def run_source(
         self,
         source_type: str,
-        merger: Optional[SourceMerger] = None,
-        limit: Optional[int] = None,
+        merger: SourceMerger | None = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_MERGE_WORKERS,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         try:
             database_url = read_secret(
                 cate1="funread", cate2="cache", cate3="source", cate4="db_url"
@@ -642,8 +646,8 @@ class MergeSourceTask:
 
     def run_book(
         self,
-        merger: Optional[SourceMerger] = None,
-        limit: Optional[int] = None,
+        merger: SourceMerger | None = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_MERGE_WORKERS,
     ):
         return self.run_source(
@@ -655,8 +659,8 @@ class MergeSourceTask:
 
     def run_rss(
         self,
-        merger: Optional[SourceMerger] = None,
-        limit: Optional[int] = None,
+        merger: SourceMerger | None = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_MERGE_WORKERS,
     ):
         return self.run_source(

@@ -2,7 +2,7 @@
 
 import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 import requests
 from farlog import getLogger
@@ -59,10 +59,10 @@ class SourceListRecord(Base):
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    last_error: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
-    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    increment_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    increment_stop: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    increment_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    increment_stop: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -112,7 +112,7 @@ _INITIALIZED_DATABASES = set()
 SOURCE_DETAIL_ID_START = 10_000_000
 
 
-def normalize_source_status(status: Optional[int]) -> int:
+def normalize_source_status(status: int | None) -> int:
     normalized = int(status or SOURCE_STATUS_PENDING)
     if normalized not in VALID_SOURCE_STATUSES:
         raise ValueError(f"Invalid source status: {status}")
@@ -125,7 +125,7 @@ def compute_url_md5(url: str) -> str:
     return hashlib.md5(url.encode("utf-8")).hexdigest()
 
 
-def _get_database_url(database_url: Optional[str] = None) -> Optional[str]:
+def _get_database_url(database_url: str | None = None) -> str | None:
     return database_url or resolve_database_url()
 
 
@@ -143,7 +143,7 @@ def _tune_sqlite(dbapi_conn: Any, _record: Any) -> None:
     cursor.close()
 
 
-def _get_engine(database_url: Optional[str] = None):
+def _get_engine(database_url: str | None = None):
     resolved_url = _get_database_url(database_url)
     engine = _ENGINE_CACHE.get(resolved_url)
     if engine is None:
@@ -154,7 +154,7 @@ def _get_engine(database_url: Optional[str] = None):
     return engine
 
 
-def _get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
+def _get_session_factory(database_url: str | None = None) -> sessionmaker:
     resolved_url = _get_database_url(database_url)
     factory = _SESSION_FACTORY_CACHE.get(resolved_url)
     if factory is None:
@@ -163,13 +163,13 @@ def _get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
     return factory
 
 
-def get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
+def get_session_factory(database_url: str | None = None) -> sessionmaker:
     """Public accessor for the cached session factory (e.g. for the API layer)."""
     init_source_db(database_url=database_url)
     return _get_session_factory(database_url=database_url)
 
 
-def init_source_db(database_url: Optional[str] = None) -> None:
+def init_source_db(database_url: str | None = None) -> None:
     resolved_url = _get_database_url(database_url)
     if not resolved_url or resolved_url in _INITIALIZED_DATABASES:
         return
@@ -328,10 +328,10 @@ def count_source_payloads(payloads: list[Any]) -> int:
 
 
 def _build_source_list_query(
-    source_type: Optional[str] = None,
-    min_source_count: Optional[int] = None,
-    max_source_count: Optional[int] = None,
-    queried_before: Optional[datetime] = None,
+    source_type: str | None = None,
+    min_source_count: int | None = None,
+    max_source_count: int | None = None,
+    queried_before: datetime | None = None,
 ):
     stmt = select(SourceListRecord).where(SourceListRecord.enabled.is_(True))
     if source_type:
@@ -346,13 +346,13 @@ def _build_source_list_query(
 
 
 def iter_source_list_data(
-    source_type: Optional[str] = None,
-    min_source_count: Optional[int] = None,
-    max_source_count: Optional[int] = None,
+    source_type: str | None = None,
+    min_source_count: int | None = None,
+    max_source_count: int | None = None,
     stale_seconds: int = 86400,
-    limit: Optional[int] = None,
+    limit: int | None = None,
     timeout: int = 30,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> Iterator[tuple[SourceListRecord, Any]]:
     """Yield updated source-list records and payloads for stale URLs ordered by last query time."""
     init_source_db(database_url=database_url)
@@ -399,9 +399,9 @@ def iter_source_list_data(
 
 
 def list_source_detail_records(
-    source_type: Optional[str] = None,
-    statuses: Optional[list[int]] = None,
-    database_url: Optional[str] = None,
+    source_type: str | None = None,
+    statuses: list[int] | None = None,
+    database_url: str | None = None,
 ) -> list[SourceDetailRecord]:
     """List source-detail records ordered by id."""
     init_source_db(database_url=database_url)
@@ -421,8 +421,8 @@ def list_source_detail_records(
 
 
 def load_source_index_map(
-    source_type: Optional[str] = None,
-    database_url: Optional[str] = None,
+    source_type: str | None = None,
+    database_url: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load md5 index metadata from source-index records."""
     init_source_db(database_url=database_url)
@@ -449,7 +449,7 @@ def load_source_index_map(
 def upsert_source_index_records(
     records: list[dict[str, Any]],
     source_type: str,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> None:
     """Bulk upsert source-content index metadata."""
     if not source_type:
@@ -505,7 +505,7 @@ def upsert_source_index_records(
 def replace_source_index_records(
     records: list[dict[str, Any]],
     source_type: str,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> None:
     """Replace all source-index rows for a source type with the provided records."""
     if not source_type:
@@ -541,7 +541,7 @@ def replace_source_index_records_for_url(
     records: list[dict[str, Any]],
     source_type: str,
     url_id: int,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> None:
     """Replace source-index rows for one source type/url_id pair."""
     if not source_type:
@@ -579,7 +579,7 @@ def replace_source_index_records_for_url(
 def replace_source_detail_records(
     records: list[dict[str, Any]],
     source_type: str,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> None:
     """Replace all source-detail rows for a source type with the provided records."""
     if not source_type:
@@ -613,8 +613,8 @@ def replace_source_detail_records(
 
 
 def load_source_detail_url_map(
-    source_type: Optional[str] = None,
-    database_url: Optional[str] = None,
+    source_type: str | None = None,
+    database_url: str | None = None,
 ) -> dict[str, int]:
     """Load URL to id mapping from source-detail records."""
     return {
@@ -624,8 +624,8 @@ def load_source_detail_url_map(
 
 
 def load_source_detail_status_map(
-    source_type: Optional[str] = None,
-    database_url: Optional[str] = None,
+    source_type: str | None = None,
+    database_url: str | None = None,
 ) -> dict[int, int]:
     """Load source-detail status keyed by source id."""
     return {
@@ -644,10 +644,10 @@ def _next_source_detail_id(session: Session) -> int:
 def add_source_detail_url(
     url: str,
     source_type: str,
-    source_id: Optional[int] = None,
+    source_id: int | None = None,
     version: int = 0,
     status: int = SOURCE_STATUS_PENDING,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> SourceDetailRecord:
     """Add or update a source-detail URL record."""
     return upsert_source_detail_record(
@@ -663,10 +663,10 @@ def add_source_detail_url(
 def upsert_source_detail_record(
     url: str,
     source_type: str,
-    source_id: Optional[int] = None,
+    source_id: int | None = None,
     version: int = 0,
     status: int = SOURCE_STATUS_PENDING,
-    database_url: Optional[str] = None,
+    database_url: str | None = None,
 ) -> SourceDetailRecord:
     if not url:
         raise ValueError("url is required")
@@ -731,10 +731,10 @@ def add_source_list_url(
     url: str,
     source_type: str,
     source_count: int = -1,
-    queried_at: Optional[datetime] = None,
-    increment_start: Optional[int] = None,
-    increment_stop: Optional[int] = None,
-    database_url: Optional[str] = None,
+    queried_at: datetime | None = None,
+    increment_start: int | None = None,
+    increment_stop: int | None = None,
+    database_url: str | None = None,
 ) -> SourceListRecord:
     """Add or update a source-list URL record with a default unknown count."""
     return upsert_source_list_record(
@@ -752,12 +752,12 @@ def upsert_source_list_record(
     url: str,
     source_type: str,
     source_count: int,
-    queried_at: Optional[datetime] = None,
-    fetch_succeeded: Optional[bool] = None,
-    error: Optional[str] = None,
-    increment_start: Optional[int] = None,
-    increment_stop: Optional[int] = None,
-    database_url: Optional[str] = None,
+    queried_at: datetime | None = None,
+    fetch_succeeded: bool | None = None,
+    error: str | None = None,
+    increment_start: int | None = None,
+    increment_stop: int | None = None,
+    database_url: str | None = None,
 ) -> SourceListRecord:
     if not url:
         raise ValueError("url is required")
