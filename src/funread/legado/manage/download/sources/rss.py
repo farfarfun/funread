@@ -1,6 +1,6 @@
 """RSS source processor."""
 
-from typing import Any, Dict
+from typing import Any
 
 from funread.legado.manage.source.storage import iter_source_list_data
 from funread.legado.manage.utils import retain_zh_ch_dig
@@ -11,7 +11,7 @@ from ..core.processor import SourceProcessor
 class RSSSourceFormat:
     """RSS 源格式化类，用于统一 RSS 源格式"""
 
-    def __init__(self, source: Dict[str, Any]):
+    def __init__(self, source: dict[str, Any]):
         self.source = source
         self.source["sourceComment"] = ""
         self.source["sourceUrl"] = self.source["sourceUrl"].rstrip("/|#")
@@ -20,7 +20,7 @@ class RSSSourceFormat:
         for key in ["sourceGroup", "sourceName"]:
             self.source[key] = retain_zh_ch_dig(self.source.get(key, ""))
 
-    def run(self) -> Dict[str, Any]:
+    def run(self) -> dict[str, Any]:
         keys_to_remove = [key for key in self.source.keys() if not self.source[key]]
         for key in keys_to_remove:
             self.source.pop(key)
@@ -36,7 +36,7 @@ class RSSSourceFormat:
 class RSSSourceProcessor(SourceProcessor):
     """RSS 源处理器。"""
 
-    def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
+    def source_format(self, source: dict[str, Any]) -> dict[str, Any]:
         return RSSSourceFormat(source).run()
 
     def loader(self) -> None:

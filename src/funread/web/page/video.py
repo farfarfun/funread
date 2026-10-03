@@ -1,6 +1,6 @@
-from funread.web.parse.video import VideoInfo
-
 from nicegui import ui
+
+from funread.web.parse.video import VideoInfo
 
 
 def video_page(video_info: VideoInfo = None):

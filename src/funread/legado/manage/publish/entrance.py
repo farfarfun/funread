@@ -1,22 +1,39 @@
 """入口页发布模块。"""
 
-from datetime import datetime
 import json
 import os
+from datetime import datetime
 
 import requests
-from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
+
+try:
+    from fundrive.drives.github import GithubDrive
+except ImportError:  # pragma: no cover - fundrive 仅要求 Python >= 3.12
+    GithubDrive = None
 
 
 faker = Headers()
 
 
 class UpdateEntrance:
-    """生成并发布 Legado 入口页数据。"""
+    """生成并发布 Legado 入口页数据。
+
+    依赖可选包 ``fundrive``（要求 Python >= 3.12）。
+    """
 
     def __init__(self) -> None:
-        """初始化 GitHub 存储驱动并登录目标仓库。"""
+        """初始化 GitHub 存储驱动并登录目标仓库。
+
+        Raises:
+            ImportError: 未安装可选依赖 fundrive 时抛出，提示安装
+                ``funread[publish]``（且需要 Python >= 3.12）。
+        """
+        if GithubDrive is None:
+            raise ImportError(
+                "UpdateEntrance 需要可选依赖 fundrive（Python >= 3.12）："
+                "请执行 `pip install funread[publish]`"
+            )
         self.drive = GithubDrive()
         self.drive.login(
             repo_owner="farfarfun",

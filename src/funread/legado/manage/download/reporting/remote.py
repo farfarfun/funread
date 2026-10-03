@@ -1,13 +1,12 @@
 """Remote publishing helpers for source snapshots."""
 
-from typing import Any, Dict, List
 import json
 import re
+from typing import Any
 
 from farlog import getLogger
 
 from ..core.constants import EXPORT_BATCH_SIZE
-
 
 logger = getLogger("funread")
 
@@ -25,7 +24,7 @@ class SourceRemoteManager:
         message = str(error).lower()
         return "too large" in message or "422" in message
 
-    def upload_single_batch(self, data: List[Dict[str, Any]], counter: int) -> None:
+    def upload_single_batch(self, data: list[dict[str, Any]], counter: int) -> None:
         git_path = f"{self.context.dir_path}/progress-{counter}.json"
         filename = f"progress-{counter}.json"
         self.context.drive.upload_file(
@@ -37,7 +36,7 @@ class SourceRemoteManager:
         self.context._remember_source_count(git_path, filename, count=len(data))
         logger.info(f"Uploaded {len(data)} sources to {git_path}")
 
-    def upload_batch(self, data: List[Dict[str, Any]], counter: int) -> int:
+    def upload_batch(self, data: list[dict[str, Any]], counter: int) -> int:
         try:
             self.upload_single_batch(data, counter)
             return counter + 1

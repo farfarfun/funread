@@ -14,9 +14,7 @@ class BaseParse:
         """
         self.source = source
 
-    def parse_list(
-        self, page_no: int, page_size: int = 10, *args: Any, **kwargs: Any
-    ) -> Any:
+    def parse_list(self, page_no: int, page_size: int = 10, *args: Any, **kwargs: Any) -> Any:
         """解析分页列表。
 
         Args:

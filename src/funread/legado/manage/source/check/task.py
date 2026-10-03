@@ -1,12 +1,13 @@
 """Source availability checking tasks."""
 
+import json
 import os
-from typing import Dict, List, Optional
 
 import requests
 from farlog import getLogger
 from funsecret import read_secret
 from funworker import BaseProcessor, Pipeline
+from sqlalchemy.exc import SQLAlchemyError
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
@@ -19,7 +20,6 @@ from ..storage import (
     load_source_detail_status_map,
 )
 from ..sync.task import SyncLocalSourceRecordsTask
-
 
 logger = getLogger("funread")
 
@@ -60,7 +60,7 @@ class SourceStatusCheckRunner:
         self.timeout = timeout
         self.max_workers = max(1, int(max_workers))
 
-    def run(self, limit: Optional[int] = None) -> Dict[str, int]:
+    def run(self, limit: int | None = None) -> dict[str, int]:
         stats = {"processed": 0, "available": 0, "unavailable": 0, "failed": 0}
         file_paths = self.iter_source_files()
         if limit is not None:
@@ -87,8 +87,8 @@ class SourceStatusCheckRunner:
         stats["failed"] = counts.get("failed", 0)
         return stats
 
-    def iter_source_files(self) -> List[str]:
-        file_list: List[tuple[int, int, str]] = []
+    def iter_source_files(self) -> list[str]:
+        file_list: list[tuple[int, int, str]] = []
         status_map = self._load_status_map()
         if not os.path.exists(self.store.path_bok):
             return []
@@ -135,7 +135,7 @@ class SourceStatusCheckRunner:
             logger.warning(f"Failed to check source file {file_path}: {e}")
             return "failed"
 
-    def _load_status_map(self) -> Dict[int, int]:
+    def _load_status_map(self) -> dict[int, int]:
         database_url = getattr(self.store, "database_url", None)
         if not database_url:
             return {}
@@ -144,19 +144,20 @@ class SourceStatusCheckRunner:
                 source_type=self.store.cate1,
                 database_url=database_url,
             )
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning(f"Failed to load source status map for check: {e}")
             return {}
 
     @staticmethod
-    def _extract_url_id_from_path(file_path: str) -> Optional[int]:
+    def _extract_url_id_from_path(file_path: str) -> int | None:
         name = os.path.splitext(os.path.basename(file_path))[0]
         return int(name) if name.isdigit() else None
 
     def _read_file_status(self, file_path: str) -> int:
         try:
             data = self.store._load_json_safely(file_path)
-        except Exception:
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Treating unreadable source file as pending: {file_path}: {e}")
             return SOURCE_STATUS_PENDING
         status = data.get("status")
         if isinstance(status, int):
@@ -168,7 +169,8 @@ class SourceStatusCheckRunner:
     def _read_version(self, file_path: str) -> int:
         try:
             data = self.store._load_json_safely(file_path)
-        except Exception:
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Treating unreadable source file as version 0: {file_path}: {e}")
             return 0
         items = data.get("candidate", [])
         if not isinstance(items, list):
@@ -183,7 +185,7 @@ class SourceStatusCheckRunner:
             version += sum(1 for value in md5_list if isinstance(value, str) and value)
         return version
 
-    def _pick_source_url(self, data: Dict[str, object]) -> str:
+    def _pick_source_url(self, data: dict[str, object]) -> str:
         source_url_key = self.store.get_source_url_key()
         for key in ("merged", "candidate"):
             items = data.get(key, [])
@@ -216,7 +218,7 @@ class SourceStatusCheckRunner:
     def _update_file_status(
         self,
         file_path: str,
-        data: Dict[str, object],
+        data: dict[str, object],
         status: int,
         available: bool,
     ) -> None:
@@ -240,7 +242,7 @@ class SourceStatusCheckRunner:
 class CheckSourceStatusTask:
     """Run source status checks for a local source store."""
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path or self._read_cache_root()
 
     @staticmethod
@@ -249,7 +251,7 @@ class CheckSourceStatusTask:
 
     @staticmethod
     def _create_store(
-        path: str, source_type: str, database_url: Optional[str] = None
+        path: str, source_type: str, database_url: str | None = None
     ) -> SourceProcessor:
         if source_type == "book":
             return BookSourceProcessor(path=path, cate1="book", database_url=database_url)
@@ -261,14 +263,15 @@ class CheckSourceStatusTask:
         self,
         source_type: str,
         timeout: int = DEFAULT_CHECK_TIMEOUT,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_CHECK_WORKERS,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         try:
             database_url = read_secret(
                 cate1="funread", cate2="cache", cate3="source", cate4="db_url"
             )
-        except Exception:
+        except (KeyError, ValueError) as e:
+            logger.debug(f"database_url secret not configured, continuing without it: {e}")
             database_url = None
         with self._create_store(
             self.path,
@@ -285,7 +288,7 @@ class CheckSourceStatusTask:
     def run_book(
         self,
         timeout: int = DEFAULT_CHECK_TIMEOUT,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_CHECK_WORKERS,
     ):
         return self.run_source(
@@ -298,7 +301,7 @@ class CheckSourceStatusTask:
     def run_rss(
         self,
         timeout: int = DEFAULT_CHECK_TIMEOUT,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         max_workers: int = DEFAULT_CHECK_WORKERS,
     ):
         return self.run_source(

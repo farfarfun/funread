@@ -1,6 +1,6 @@
-"""Book source processor."""
+"""书源处理器模块。"""
 
-from typing import Any, Dict
+from typing import Any
 
 from funread.legado.manage.source.storage import iter_source_list_data
 from funread.legado.manage.utils import retain_zh_ch_dig
@@ -11,7 +11,7 @@ from ..core.processor import SourceProcessor
 class BookSourceFormat:
     """书源格式化类，用于统一书源规则格式"""
 
-    def __init__(self, source: Dict[str, Any]):
+    def __init__(self, source: dict[str, Any]):
         self.source = source
         self.source["bookSourceComment"] = ""
         self.source["bookSourceUrl"] = self.source["bookSourceUrl"].rstrip("/|#")
@@ -21,7 +21,16 @@ class BookSourceFormat:
         for key in ["bookSourceGroup", "bookSourceName"]:
             self.source[key] = retain_zh_ch_dig(self.source.get(key, ""))
 
-    def run(self) -> Dict[str, Any]:
+    def run(self) -> dict[str, Any]:
+        """执行全部格式化步骤，将原始书源规则整理为统一结构。
+
+        依次整理书籍信息、正文、搜索、发现、目录相关规则分组，合并仅含
+        ``url`` 的 ``ruleSearch``，剔除空字段与调度相关的临时字段，并把
+        各规则里的 URL 前缀（与 ``bookSourceUrl`` 相同的部分）裁剪掉。
+
+        Returns:
+            整理后的书源字典（即构造函数传入的 ``source``，原地修改后返回）。
+        """
         self.format_book_info()
         self.format_content()
         self.format_search()
@@ -146,5 +155,5 @@ class BookSourceProcessor(SourceProcessor):
         for _, data in iter_source_list_data(source_type=self.cate1):
             self.add_sources(data)
 
-    def source_format(self, source: Dict[str, Any]) -> Dict[str, Any]:
+    def source_format(self, source: dict[str, Any]) -> dict[str, Any]:
         return BookSourceFormat(source).run()

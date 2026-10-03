@@ -11,6 +11,7 @@ import requests
 from farlog import getLogger
 from funsecret import read_secret
 from funworker import BaseProcessor, Pipeline
+from sqlalchemy.exc import SQLAlchemyError
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
@@ -24,7 +25,6 @@ from ..storage import (
     load_source_detail_status_map,
 )
 from ..sync.task import SyncLocalSourceRecordsTask
-
 
 logger = getLogger("funread")
 
@@ -90,9 +90,7 @@ class OpenAICompatibleSourceMerger:
         return json.loads(text[start : end + 1])
 
     @staticmethod
-    def _build_prompt(
-        source_type: str, hostname: str, versions: list[dict[str, Any]]
-    ) -> str:
+    def _build_prompt(source_type: str, hostname: str, versions: list[dict[str, Any]]) -> str:
         versions_json = json.dumps(versions, ensure_ascii=False, separators=(",", ":"))
         return (
             "你是一个阅读源合并器。"
@@ -129,7 +127,7 @@ class OpenAICompatibleSourceMerger:
             response.raise_for_status()
             try:
                 result = response.json()
-            except Exception:
+            except ValueError:
                 text = response.text
                 logger.info(
                     "LLM merge request finished with raw text: "
@@ -306,7 +304,7 @@ class SourceMergeRunner:
                 source_type=self.store.cate1,
                 database_url=database_url,
             )
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning(f"Failed to load source status map for merge: {e}")
             return {}
 
@@ -318,7 +316,8 @@ class SourceMergeRunner:
     def _read_file_status(self, file_path: str) -> int:
         try:
             data = self.store._load_json_safely(file_path)
-        except Exception:
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Treating unreadable source file as pending: {file_path}: {e}")
             return SOURCE_STATUS_PENDING
         status = data.get("status")
         if isinstance(status, int):
@@ -387,16 +386,15 @@ class SourceMergeRunner:
     def _read_version_count(self, file_path: str) -> int:
         try:
             data = self.store._load_json_safely(file_path)
-        except Exception:
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Treating unreadable source file as version 0: {file_path}: {e}")
             return 0
         return len(self._collect_version_items(data))
 
     def _estimate_version_items_size(self, version_items: list[VersionItem]) -> int:
         return len(json.dumps([item["source"] for item in version_items], ensure_ascii=False))
 
-    def _split_version_items(
-        self, version_items: list[VersionItem]
-    ) -> list[list[VersionItem]]:
+    def _split_version_items(self, version_items: list[VersionItem]) -> list[list[VersionItem]]:
         chunks: list[list[VersionItem]] = []
         current: list[VersionItem] = []
         current_size = 0
@@ -632,7 +630,8 @@ class MergeSourceTask:
             database_url = read_secret(
                 cate1="funread", cate2="cache", cate3="source", cate4="db_url"
             )
-        except Exception:
+        except (KeyError, ValueError) as e:
+            logger.debug(f"database_url secret not configured, continuing without it: {e}")
             database_url = None
         with self._create_store(
             self.path, source_type=source_type, database_url=database_url

@@ -1,3 +1,5 @@
+import os
+
 from farlog import getLogger
 from nicegui import ui
 from nicegui.events import ValueChangeEventArguments
@@ -7,6 +9,8 @@ from funread.web.parse.video import ParseVideo
 from .video import VideoInfo, video_page
 
 logger = getLogger("funread")
+
+DEFAULT_PORT = 8080
 
 
 def show(event: ValueChangeEventArguments) -> None:
@@ -38,9 +42,7 @@ def video_list_page(parse: ParseVideo, tab_id: int = 0):
     return video_list_play
 
 
-def video_list_play(
-    parse: ParseVideo, tab_id: int = 0, rows: int = 10, cols: int = 2
-) -> None:
+def video_list_play(parse: ParseVideo, tab_id: int = 0, rows: int = 10, cols: int = 2) -> None:
     ui.button("Button", on_click=lambda: ui.notify("Click"))
     videos = parse.parse_video_list()
     logger.debug("视频列表已加载，共 {} 项", len(videos.video_list))
@@ -70,10 +72,14 @@ def video_list_tabs_page(parse: ParseVideo, tab_id: int = 0):
     return video_list_tabs_play
 
 
-def run() -> None:
-    """启动 NiceGUI 视频列表开发服务。"""
-    ui.run()
+def run(port: int = DEFAULT_PORT) -> None:
+    """启动 NiceGUI 视频列表开发服务。
+
+    Args:
+        port: 监听端口，默认 8080，可通过 ``FUNREAD_WEB_PORT`` 环境变量覆盖。
+    """
+    ui.run(port=port)
 
 
 if __name__ == "__main__":
-    run()
+    run(port=int(os.environ.get("FUNREAD_WEB_PORT", DEFAULT_PORT)))

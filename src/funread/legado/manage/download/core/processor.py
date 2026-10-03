@@ -3,7 +3,7 @@
 import json
 import os
 import traceback
-from typing import Any, Optional
+from typing import Any
 
 import requests
 from farlog import getLogger
@@ -133,7 +133,7 @@ class SourceProcessor(LocalSourceStore):
             return 0
         return sum(1 for source in parsed_data if self.add_source(source, *args, **kwargs))
 
-    def _parse_input_data(self, data: str | dict | list) -> Optional[dict | list]:
+    def _parse_input_data(self, data: str | dict | list) -> dict | list | None:
         if isinstance(data, str):
             return self._parse_string_data(data)
         if isinstance(data, (dict, list)):
@@ -141,7 +141,7 @@ class SourceProcessor(LocalSourceStore):
         logger.error(f"Invalid data type: {type(data)}")
         return None
 
-    def _parse_string_data(self, data: str) -> Optional[dict | list]:
+    def _parse_string_data(self, data: str) -> dict | list | None:
         if data.startswith(("http://", "https://")):
             return self._fetch_from_url(data)
         if os.path.exists(data):
@@ -155,7 +155,7 @@ class SourceProcessor(LocalSourceStore):
         logger.error(f"Invalid data format: {data[:100]}")
         return None
 
-    def _fetch_from_url(self, url: str) -> Optional[dict | list]:
+    def _fetch_from_url(self, url: str) -> dict | list | None:
         try:
             response = requests.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -171,12 +171,12 @@ class SourceProcessor(LocalSourceStore):
             logger.error(f"Failed to parse JSON from URL {url}: {e}")
             return None
 
-    def _load_from_file(self, file_path: str) -> Optional[dict | list]:
+    def _load_from_file(self, file_path: str) -> dict | list | None:
         try:
             if file_path.endswith(".pkl") or file_path.endswith(".pkl.bz2"):
                 logger.warning("Pickle format is deprecated, use JSON instead")
                 return pickle.load(file_path)
             return self._load_json_safely(file_path)
-        except (IOError, Exception) as e:
+        except Exception as e:
             logger.error(f"Failed to load file {file_path}: {e}")
             return None

@@ -2,15 +2,24 @@
 
 from typing import Any
 
-from fundrive.drives.github import GithubDrive
-
 from .core.constants import DEFAULT_REPO, INITIAL_COUNTER, MIN_UPLOAD_BATCH_SIZE
 from .reporting import SourceRemoteManager, SourceReportBuilder
 from .sources import SourceStoreFactory
 
+try:
+    from fundrive.drives.github import GithubDrive
+except ImportError:  # pragma: no cover - fundrive 仅要求 Python >= 3.12
+    GithubDrive = None
+
 
 class SourceBuildContext:
-    """Shared runtime context for source generation tasks."""
+    """共享运行时上下文，供源码生成/上传/发布任务共用。
+
+    依赖可选包 ``fundrive``（要求 Python >= 3.12），用于把生成的源文件上传
+    到 GitHub。未安装时构造函数会抛出明确的 ``ImportError``，而不是让
+    导入本模块本身失败，以免拖垮不需要上传能力的调用方（如本地校验、
+    测试）。
+    """
 
     def __init__(
         self,
@@ -18,6 +27,11 @@ class SourceBuildContext:
         source_type: str = "booksource",
         repo: str = DEFAULT_REPO,
     ):
+        if GithubDrive is None:
+            raise ImportError(
+                "SourceBuildContext 需要可选依赖 fundrive（Python >= 3.12）："
+                "请执行 `pip install funread[publish]`"
+            )
         self.repo_str = repo
         self.dir_path = dir_path
         self.source_type = source_type

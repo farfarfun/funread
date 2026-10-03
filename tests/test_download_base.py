@@ -6,8 +6,6 @@ import funread.legado.manage.download.sources.rss as rss_module
 import funread.legado.manage.download.task as generate_task_module
 import funread.legado.manage.source.check.task as check_module
 import funread.legado.manage.source.merge.task as merge_module
-
-from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
 from funread.legado.manage.download import (
     DownloadSourceDataTask,
     DumpSourceBackupTask,
@@ -17,6 +15,7 @@ from funread.legado.manage.download import (
     UploadSourceBatchesTask,
 )
 from funread.legado.manage.download.context import SourceBuildContext
+from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
 from funread.legado.manage.download.sources.book import BookSourceProcessor
 from funread.legado.manage.source import (
     SOURCE_STATUS_AVAILABLE,

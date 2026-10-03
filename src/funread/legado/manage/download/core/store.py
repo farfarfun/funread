@@ -1,19 +1,20 @@
 """Local source storage primitives."""
 
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Iterator
 
+from farlog import getLogger
 from funfile import funos
 from funfile.compress import tarfile
-from farlog import getLogger
 from tqdm import tqdm
 
 from ...source.storage import SOURCE_STATUS_AVAILABLE, SOURCE_STATUS_PENDING
 from .constants import DEFAULT_BACKUP_ID
-
 
 logger = getLogger("funread")
 
@@ -21,7 +22,7 @@ logger = getLogger("funread")
 class SourceStoreTask:
     """Base class for tasks that operate on a local source store."""
 
-    def __init__(self, store: Optional["LocalSourceStore"] = None):
+    def __init__(self, store: LocalSourceStore | None = None):
         self.store = store
 
 
@@ -37,8 +38,8 @@ class LocalSourceStore:
         self.path_bok = str(base_path / "source")
         self.database_url = kwargs.get("database_url")
 
-        self.url_map: Dict[str, int] = {}
-        self.md5_set: Dict[str, Dict[str, Any]] = {}
+        self.url_map: dict[str, int] = {}
+        self.md5_set: dict[str, dict[str, Any]] = {}
         self.current_id = 1
         self._ensure_directories()
 
@@ -56,7 +57,7 @@ class LocalSourceStore:
             return False
 
     @staticmethod
-    def _load_json_safely(file_path: str) -> Dict[str, Any]:
+    def _load_json_safely(file_path: str) -> dict[str, Any]:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -68,7 +69,7 @@ class LocalSourceStore:
             raise
 
     @staticmethod
-    def _save_json_safely(file_path: str, data: Dict[str, Any]) -> None:
+    def _save_json_safely(file_path: str, data: dict[str, Any]) -> None:
         try:
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
@@ -78,7 +79,7 @@ class LocalSourceStore:
             raise
 
     @staticmethod
-    def _coerce_int(value: Any) -> Optional[int]:
+    def _coerce_int(value: Any) -> int | None:
         if isinstance(value, bool):
             return None
         if isinstance(value, int):
@@ -104,8 +105,8 @@ class LocalSourceStore:
     def add_source_to_candidate(
         md5: str,
         fpath: str,
-        source: Dict[str, Any],
-        url_info: Optional[Dict[str, Any]] = None,
+        source: dict[str, Any],
+        url_info: dict[str, Any] | None = None,
     ) -> None:
         url_info = url_info or {}
         if os.path.exists(fpath):
@@ -125,7 +126,7 @@ class LocalSourceStore:
             LocalSourceStore._save_json_safely(fpath, data)
 
     @staticmethod
-    def _create_default_data(url_info: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_default_data(url_info: dict[str, Any]) -> dict[str, Any]:
         return {
             "available": True,
             "merged": [],
@@ -136,7 +137,7 @@ class LocalSourceStore:
         }
 
     @staticmethod
-    def _collect_existing_md5s(data: Dict[str, Any]) -> List[str]:
+    def _collect_existing_md5s(data: dict[str, Any]) -> list[str]:
         md5_list = []
         for key in ("merged", "candidate"):
             if key in data:
@@ -145,15 +146,15 @@ class LocalSourceStore:
                         md5_list.extend(item["md5_list"])
         return md5_list
 
-    def export_sources(self, size: int = 1000) -> Iterator[List[Dict[str, Any]]]:
-        file_list: List[str] = []
+    def export_sources(self, size: int = 1000) -> Iterator[list[dict[str, Any]]]:
+        file_list: list[str] = []
         if os.path.exists(self.path_bok):
             for root, _, files in os.walk(self.path_bok):
                 for file in files:
                     if file.endswith(".json"):
                         file_list.append(os.path.join(root, file))
 
-        dd: List[Dict[str, Any]] = []
+        dd: list[dict[str, Any]] = []
         for file_path in tqdm(file_list, desc="Exporting sources"):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -247,7 +248,7 @@ class LocalSourceStore:
             logger.error(f"Failed to save source index: {e}")
             raise
 
-    def loads_zip(self, zip_file: Optional[str] = None) -> None:
+    def loads_zip(self, zip_file: str | None = None) -> None:
         if os.path.exists(self.path_pkl):
             funos.delete(self.path_pkl)
         if os.path.exists(self.path_bok):
@@ -343,7 +344,7 @@ class DumpSourceBackupTask(SourceStoreTask):
 class LoadSourceBackupTask(SourceStoreTask):
     """Load local source data from the latest or a given backup archive."""
 
-    def __init__(self, store=None, zip_file: Optional[str] = None):
+    def __init__(self, store=None, zip_file: str | None = None):
         self.zip_file = zip_file
         super(LoadSourceBackupTask, self).__init__(store=store)
 

@@ -1,11 +1,10 @@
 """工具函数模块"""
 
 import re
-from typing import Optional
 from urllib.parse import urlparse
 
 
-def url_to_hostname(url: str) -> Optional[str]:
+def url_to_hostname(url: str) -> str | None:
     """
     从 URL 中提取主机名
 
@@ -18,7 +17,7 @@ def url_to_hostname(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
         return parsed.hostname
-    except Exception:
+    except ValueError:
         return None
 
 

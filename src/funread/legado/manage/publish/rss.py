@@ -5,11 +5,15 @@ from typing import Any
 
 import requests
 from farlog import getLogger
-from fundrive.drives.github import GithubDrive
 from funfake.headers import Headers
 from funworker import BaseConsumer, BaseProcessor, Pipeline
 
 from ..utils.worker import ListProducer
+
+try:
+    from fundrive.drives.github import GithubDrive
+except ImportError:  # pragma: no cover - fundrive 仅要求 Python >= 3.12
+    GithubDrive = None
 
 logger = getLogger("funread")
 
@@ -63,9 +67,26 @@ class _OrderedResultsConsumer(BaseConsumer):
 
 
 class UpdateRssTask:
-    """RSS 更新任务，用于更新订阅源列表"""
+    """RSS 更新任务，用于更新订阅源列表。
+
+    依赖可选包 ``fundrive``（要求 Python >= 3.12）。
+    """
 
     def __init__(self, repo: str = DEFAULT_REPO) -> None:
+        """初始化 GitHub 存储驱动并登录目标仓库。
+
+        Args:
+            repo: 目标仓库，格式为 ``owner/name``。
+
+        Raises:
+            ImportError: 未安装可选依赖 fundrive 时抛出，提示安装
+                ``funread[publish]``（且需要 Python >= 3.12）。
+        """
+        if GithubDrive is None:
+            raise ImportError(
+                "UpdateRssTask 需要可选依赖 fundrive（Python >= 3.12）："
+                "请执行 `pip install funread[publish]`"
+            )
         self.drive = GithubDrive()
         self.drive.login(repo)
         self.repo = repo
