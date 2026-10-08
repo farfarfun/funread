@@ -30,6 +30,9 @@ build-backend = "hatchling.build"
 [project.optional-dependencies]
 dev = [ "pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0", "httpx2>=2.0.0",]
 web = [ "nicegui>=2.0.0", "pydantic>=2.0.0",]
+parse = [ "lxml>=5.1.0", "cssselect>=1.2.0", "jsonpath-ng>=1.6.1", "charset-normalizer>=3.0.0",]
+js = [ "quickjs>=1.19.4",]
+reader = [ "funread[parse]",]
 
 [project.urls]
 Organization = "https://github.com/farfarfun"
