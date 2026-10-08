@@ -6,14 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from farlog import getLogger
 from funfile import funos
 from funfile.compress import tarfile
-from farlog import getLogger
 from tqdm import tqdm
 
 from ...source.storage import SOURCE_STATUS_AVAILABLE, SOURCE_STATUS_PENDING
 from .constants import DEFAULT_BACKUP_ID
-
 
 logger = getLogger("funread")
 
@@ -99,6 +98,34 @@ class LocalSourceStore:
 
     def get_source_url_key(self) -> str:
         return "sourceUrl"
+
+    def source_file_path(self, url_id: int) -> str:
+        """Path of the archive file for ``url_id``.
+
+        Archive layout is ``<path_bok>/<bucket>-<bucket+100>/<url_id>.json``
+        with 100 ids per bucket. Same algorithm as the sync task's
+        ``_target_file_path``; kept here so readers don't import that task.
+        """
+        bucket = (int(url_id) // 100) * 100
+        return os.path.join(self.path_bok, f"{bucket}-{bucket + 100}", f"{int(url_id)}.json")
+
+    def load_by_url_id(self, url_id: int) -> Optional[Dict[str, Any]]:
+        """Load one archived source wrapper by ``url_id``, or ``None``.
+
+        Returns the whole wrapper (``candidate``/``merged``/``status``/...),
+        not a bare source dict — picking a representative version among the
+        candidates is the caller's decision. Missing or corrupt files are
+        ``None``: the archive has 13k+ files and a single bad one must not
+        take down a reader request.
+        """
+        file_path = self.source_file_path(url_id)
+        if not os.path.exists(file_path):
+            return None
+        try:
+            data = self._load_json_safely(file_path)
+        except (json.JSONDecodeError, IOError):
+            return None
+        return data if isinstance(data, dict) else None
 
     @staticmethod
     def add_source_to_candidate(

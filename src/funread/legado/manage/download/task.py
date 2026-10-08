@@ -2,10 +2,9 @@
 
 from typing import Any, Dict
 
-from funsecret import read_secret
 from farlog import getLogger
 
-from funread.base.config import resolve_database_url
+from funread.base.config import resolve_cache_root, resolve_database_url
 
 from ..source.check.task import CheckSourceStatusTask
 from ..source.merge.task import SourceMergeRunner
@@ -14,7 +13,6 @@ from .context import SourceBuildContext
 from .core.constants import DEFAULT_DIR_PATH, DEFAULT_REPO
 from .core.store import DownloadSourceDataTask, DumpSourceBackupTask, LoadSourceBackupTask
 from .reporting.remote import PublishSourceReportTask, UploadSourceBatchesTask
-
 
 logger = getLogger("funread")
 
@@ -34,7 +32,7 @@ class GenerateSourceTask:
 
     @staticmethod
     def get_cache_root() -> str:
-        return read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
+        return resolve_cache_root()
 
     def build_context(self, source_type: str) -> SourceBuildContext:
         return SourceBuildContext(

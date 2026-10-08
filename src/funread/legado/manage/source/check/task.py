@@ -5,8 +5,9 @@ from typing import Dict, List, Optional
 
 import requests
 from farlog import getLogger
-from funsecret import read_secret
 from funworker import BaseProcessor, Pipeline
+
+from funread.base.config import resolve_cache_root, resolve_database_url
 
 from ...download.core.processor import SourceProcessor
 from ...download.sources.book import BookSourceProcessor
@@ -19,7 +20,6 @@ from ..storage import (
     load_source_detail_status_map,
 )
 from ..sync.task import SyncLocalSourceRecordsTask
-
 
 logger = getLogger("funread")
 
@@ -241,11 +241,7 @@ class CheckSourceStatusTask:
     """Run source status checks for a local source store."""
 
     def __init__(self, path: Optional[str] = None):
-        self.path = path or self._read_cache_root()
-
-    @staticmethod
-    def _read_cache_root() -> str:
-        return read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
+        self.path = path or resolve_cache_root()
 
     @staticmethod
     def _create_store(
@@ -264,12 +260,9 @@ class CheckSourceStatusTask:
         limit: Optional[int] = None,
         max_workers: int = DEFAULT_CHECK_WORKERS,
     ) -> Dict[str, int]:
-        try:
-            database_url = read_secret(
-                cate1="funread", cate2="cache", cate3="source", cate4="db_url"
-            )
-        except Exception:
-            database_url = None
+        #  必须走 resolve_database_url()：直读 funsecret 会绕过
+        #  FUNREAD_DATABASE_URL，本地跑一次探活就写到生产库里了
+        database_url = resolve_database_url()
         with self._create_store(
             self.path,
             source_type=source_type,

@@ -54,3 +54,9 @@ disallow_untyped_defs = false
 [tool.ruff.lint]
 select = [ "E", "F", "I", "N", "W",]
 ignore = [ "E501",]
+
+[tool.ruff.lint.isort]
+# funread is this package. Ruff also finds it installed in site-packages and
+# would otherwise sort absolute `from funread.base.config import ...` in with
+# the third-party block.
+known-first-party = ["funread"]

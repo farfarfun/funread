@@ -1,9 +1,13 @@
-"""Database URL resolution.
+"""Database URL and cache root resolution.
 
 Priority: ``FUNREAD_DATABASE_URL`` env var > funsecret
 (``funread/cache/source/db_url``) > local SQLite fallback. This mirrors
 funflix's ``base/config.py`` so a fresh clone can run the pipeline and API
 against a local SQLite file without any secret store configured.
+
+The cache root (where source JSON files live) follows the same shape:
+``FUNREAD_CACHE_ROOT`` > funsecret (``funread/cache/path/root``) > a fixed
+path under the user cache dir.
 """
 
 from __future__ import annotations
@@ -21,10 +25,24 @@ logger = getLogger("funread")
 DEFAULT_DATABASE_PATH = Path.home() / ".cache" / "farfarfun" / "funread" / "funread.db"
 DEFAULT_DATABASE_URL = f"sqlite:///{DEFAULT_DATABASE_PATH}"
 
+#: Where downloaded source JSON files are archived. Same reasoning as the
+#: database path: fixed under the user cache dir, never CWD-relative.
+DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "farfarfun" / "funread" / "hub"
+
 
 def _fallback_to_default() -> str:
     DEFAULT_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     return DEFAULT_DATABASE_URL
+
+
+def _read_secret(*, cate3: str, cate4: str) -> str | None:
+    try:
+        from funsecret import read_secret
+
+        return read_secret(cate1="funread", cate2="cache", cate3=cate3, cate4=cate4)
+    except Exception as exc:
+        logger.debug(f"Failed to read funread/cache/{cate3}/{cate4} from funsecret: {exc}")
+        return None
 
 
 def resolve_database_url() -> str:
@@ -37,18 +55,30 @@ def resolve_database_url() -> str:
     if env_value:
         return env_value
 
-    try:
-        from funsecret import read_secret
-
-        value = read_secret(cate1="funread", cate2="cache", cate3="source", cate4="db_url")
-    except Exception as exc:
-        logger.debug(f"Failed to read funread/cache/source/db_url from funsecret: {exc}")
-        value = None
-
+    value = _read_secret(cate3="source", cate4="db_url")
     if value:
         return value
 
     return _fallback_to_default()
+
+
+def resolve_cache_root() -> str:
+    """Resolve the source-file cache root, falling back to the user cache dir.
+
+    Never raises. The pipeline tasks used to read funsecret directly with no
+    fallback, which made them unusable from a process that has no secret store
+    configured (the API server, a fresh clone, CI).
+    """
+    env_value = os.environ.get("FUNREAD_CACHE_ROOT")
+    if env_value:
+        return env_value
+
+    value = _read_secret(cate3="path", cate4="root")
+    if value:
+        return str(value)
+
+    DEFAULT_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    return str(DEFAULT_CACHE_ROOT)
 
 
 def is_sqlite_url(database_url: str) -> bool:

@@ -6,8 +6,9 @@ import threading
 from typing import Any, Dict, List, Optional, Set
 
 from farlog import getLogger
-from funsecret import read_secret
 from funworker import BaseConsumer, BaseProcessor, Pipeline
+
+from funread.base.config import resolve_cache_root
 
 from ...download.core.store import LocalSourceStore
 from ...download.sources.book import BookSourceProcessor
@@ -17,14 +18,13 @@ from ..storage import (
     SOURCE_STATUS_PENDING,
     SOURCE_STATUS_UNAVAILABLE,
     VALID_SOURCE_STATUSES,
-    load_source_detail_url_map,
     list_source_detail_records,
+    load_source_detail_url_map,
     replace_source_detail_records,
     replace_source_index_records,
     replace_source_index_records_for_url,
     upsert_source_detail_record,
 )
-
 
 logger = getLogger("funread")
 
@@ -81,11 +81,7 @@ class SyncLocalSourceRecordsTask:
     """Rebuild source detail/index records from local source files."""
 
     def __init__(self, path: Optional[str] = None):
-        self.path = path or self._read_cache_root()
-
-    @staticmethod
-    def _read_cache_root() -> str:
-        return read_secret(cate1="funread", cate2="cache", cate3="path", cate4="root")
+        self.path = path or resolve_cache_root()
 
     @staticmethod
     def _create_store(path: str, source_type: str, database_url: Optional[str] = None):

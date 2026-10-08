@@ -1,0 +1,318 @@
+"""`ReaderService`：聚合搜索、缓存命中、失败记账。注入 `StaticFetcher`，不打网。"""
+
+import json
+
+import pytest
+
+from funread.legado.engine import Chapter, StaticFetcher
+from funread.legado.engine.errors import JsNotSupportedError
+from funread.legado.reader import ReaderService, SourceRegistry, storage
+
+
+def _source(host, name):
+    return {
+        "bookSourceUrl": f"https://{host}",
+        "bookSourceName": name,
+        "searchUrl": "/s?q={{key}}",
+        "ruleSearch": {
+            "bookList": "class.r@tag.li",
+            "name": "class.n@text",
+            "author": "class.a@text",
+            "bookUrl": "tag.a@href",
+        },
+        "ruleToc": {"chapterList": "id.l@tag.a", "chapterName": "text", "chapterUrl": "href"},
+        "ruleContent": {"content": "id.c@text"},
+    }
+
+
+def _search_html(rows):
+    items = "".join(
+        f'<li><span class="n">{name}</span><span class="a">{author}</span>'
+        f'<a href="/b/{index}">去</a></li>'
+        for index, (name, author) in enumerate(rows)
+    )
+    return f'<html><body><ul class="r">{items}</ul></body></html>'
+
+
+def _write(root, url_id, source):
+    bucket = (url_id // 100) * 100
+    path = root / "book" / "source" / f"{bucket}-{bucket + 100}" / f"{url_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "url_id": url_id,
+                "status": 2,
+                "available": True,
+                "candidate": [{"md5_list": ["m"], "source": source}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def make_service(tmp_path):
+    """装好归档 + 扫描过的 service，fetcher 由测试逐个指定。"""
+
+    def _make(pages, sources, **kwargs):
+        hubs = tmp_path / "hubs"
+        for url_id, source in sources.items():
+            _write(hubs, url_id, source)
+        db = f"sqlite:///{tmp_path / 'reader.db'}"
+        registry = SourceRegistry(cache_root=str(hubs), database_url=db)
+        registry.scan()
+        fetcher = StaticFetcher(pages)
+        service = ReaderService(
+            database_url=db,
+            registry=registry,
+            fetcher_factory=lambda timeout=None: fetcher,
+            **kwargs,
+        )
+        service.fetcher = fetcher
+        return service
+
+    return _make
+
+
+# ------------------------------------------------------------------ 聚合搜索
+
+
+def test_search_merges_the_same_book_across_sources(make_service):
+    """同一本书在两个源下的 URL 完全不同，但只能出现一条结果。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=剑来": _search_html([("剑来", "烽火戏诸侯")]),
+            "https://b.example.com/s?q=剑来": _search_html([("剑来", "烽火戏诸侯")]),
+        },
+        sources={1: _source("a.example.com", "甲源"), 2: _source("b.example.com", "乙源")},
+    )
+
+    results = service.search("剑来")
+
+    assert len(results) == 1
+    assert results[0]["name"] == "剑来"
+    assert {item["url_id"] for item in results[0]["sources"]} == {1, 2}
+
+
+def test_search_keeps_different_books_apart(make_service):
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=剑": _search_html(
+                [("剑来", "烽火戏诸侯"), ("剑道独尊", "青鸾峰上")]
+            )
+        },
+        sources={1: _source("a.example.com", "甲源")},
+    )
+
+    assert len(service.search("剑")) == 2
+
+
+def test_more_sources_sorts_first(make_service):
+    """被多个站点同时收录的书通常就是用户要找的那本，也更有换源余地。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=剑": _search_html([("独苗", "甲"), ("热门", "乙")]),
+            "https://b.example.com/s?q=剑": _search_html([("热门", "乙")]),
+        },
+        sources={1: _source("a.example.com", "甲源"), 2: _source("b.example.com", "乙源")},
+    )
+
+    assert service.search("剑")[0]["name"] == "热门"
+
+
+def test_one_dead_source_does_not_kill_the_search(make_service):
+    """候选池里绝大多数源其实已经死了 —— 一个源抛异常就 500 的话这功能等于不存在。"""
+    service = make_service(
+        pages={"https://a.example.com/s?q=剑来": _search_html([("剑来", "烽火戏诸侯")])},
+        sources={
+            1: _source("a.example.com", "活源"),
+            2: _source("dead.example.com", "死源"),  # StaticFetcher 里没有这个 URL
+        },
+    )
+
+    results = service.search("剑来")
+
+    assert len(results) == 1
+    assert [item["url_id"] for item in results[0]["sources"]] == [1]
+
+
+def test_all_sources_dead_returns_empty_not_an_error(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+
+    assert service.search("剑来") == []
+
+
+def test_blank_keyword_short_circuits(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+
+    assert service.search("   ") == []
+    assert service.fetcher.requests == []
+
+
+# ------------------------------------------------------------------ 失败记账
+
+
+def test_failure_is_recorded_against_the_source(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+
+    service.search("剑来")
+
+    pref = storage.list_source_prefs(enabled_only=False, database_url=service.database_url)[0]
+    assert pref.fail_count == 1
+    assert pref.last_error
+
+
+def test_success_is_recorded_against_the_source(make_service):
+    service = make_service(
+        pages={"https://a.example.com/s?q=剑来": _search_html([("剑来", "烽火戏诸侯")])},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+
+    service.search("剑来")
+
+    assert storage.list_source_prefs(database_url=service.database_url)[0].last_ok_at is not None
+
+
+def test_js_source_is_disabled_on_the_spot(make_service, monkeypatch):
+    """JS 不支持是结构性的，下次选它结果完全一样，不能只记一次失败。"""
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+
+    def _boom(self, *args, **kwargs):
+        raise JsNotSupportedError("需要 JS")
+
+    monkeypatch.setattr("funread.legado.engine.BookSourceEngine.search", _boom)
+    service.search("剑来")
+
+    assert storage.list_source_prefs(database_url=service.database_url) == []
+
+
+# ------------------------------------------------------------------ 正文缓存
+
+
+def test_content_is_served_from_cache_without_fetching(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = storage.upsert_shelf_book({"name": "剑来"}, database_url=service.database_url)
+    storage.save_cached_chapter(
+        book_key,
+        1,
+        "https://a.example.com/c/1",
+        "第一章",
+        "缓存正文",
+        database_url=service.database_url,
+    )
+
+    result = service.content(
+        1, Chapter(index=1, url="https://a.example.com/c/1"), book_key=book_key
+    )
+
+    assert result.text == "缓存正文"
+    assert service.fetcher.requests == []
+
+
+def test_fetched_content_is_written_to_cache(make_service):
+    service = make_service(
+        pages={"https://a.example.com/c/1": '<div id="c">新抓的正文</div>'},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    book_key = storage.upsert_shelf_book({"name": "剑来"}, database_url=service.database_url)
+
+    service.content(
+        1, Chapter(index=1, name="第一章", url="https://a.example.com/c/1"), book_key=book_key
+    )
+
+    cached = storage.get_cached_chapter(book_key, 1, database_url=service.database_url)
+    assert cached.content == "新抓的正文"
+
+
+def test_content_without_a_book_key_is_not_cached(make_service):
+    """没进书架的书（比如试读）不该污染缓存表。"""
+    service = make_service(
+        pages={"https://a.example.com/c/1": '<div id="c">正文</div>'},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+
+    service.content(1, Chapter(index=1, url="https://a.example.com/c/1"))
+
+    factory = storage.get_session_factory(service.database_url)
+    with factory() as session:
+        assert session.query(storage.ReaderChapterCache).count() == 0
+
+
+def test_unknown_source_raises_lookup_error(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+
+    with pytest.raises(LookupError):
+        service.content(999999, Chapter(index=1, url="https://x/1"))
+
+
+# ------------------------------------------------------------------ 离线下载
+
+
+def test_download_skips_already_cached_chapters(make_service):
+    service = make_service(
+        pages={"https://a.example.com/c/2": '<div id="c">第二章正文</div>'},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    book_key = storage.upsert_shelf_book({"name": "剑来"}, database_url=service.database_url)
+    storage.save_cached_chapter(
+        book_key, 1, "u", "第一章", "已有", database_url=service.database_url
+    )
+
+    stats = service.download_chapters(
+        book_key,
+        1,
+        [
+            Chapter(index=1, url="https://a.example.com/c/1"),
+            Chapter(index=2, url="https://a.example.com/c/2"),
+        ],
+        interval=0,
+    )
+
+    assert stats == {"total": 2, "downloaded": 1, "cached": 1, "failed": 0}
+
+
+def test_download_counts_failures_without_raising(make_service):
+    """后台任务，一章抓不到不该让整批中断。"""
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = storage.upsert_shelf_book({"name": "剑来"}, database_url=service.database_url)
+
+    stats = service.download_chapters(
+        book_key, 1, [Chapter(index=1, url="https://a.example.com/c/1")], interval=0
+    )
+
+    assert stats["failed"] == 1
+
+
+# ------------------------------------------------------------------ 书架
+
+
+def test_shelf_carries_progress(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = service.add_to_shelf({"name": "剑来", "author": "烽火戏诸侯"})
+    service.save_progress(book_key, chapter_index=5, chapter_name="第五章", char_offset=42)
+
+    item = service.shelf()[0]
+
+    assert item["progress"] == {"chapter_index": 5, "chapter_name": "第五章", "char_offset": 42}
+
+
+def test_shelf_entry_without_progress_is_none(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    service.add_to_shelf({"name": "剑来"})
+
+    assert service.shelf()[0]["progress"] is None
+
+
+def test_switching_source_clears_the_cache(make_service):
+    """不同源的章节切分方式不同，序号对不上 —— 留着缓存等于串章。"""
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = service.add_to_shelf({"name": "剑来", "url_id": 1})
+    storage.save_cached_chapter(
+        book_key, 1, "u", "t", "甲源的第一章", database_url=service.database_url
+    )
+
+    service.switch_source(book_key, url_id=2, book_url="https://b.example.com/b/9")
+
+    assert storage.get_cached_chapter(book_key, 1, database_url=service.database_url) is None
+    assert storage.get_shelf_book(book_key, database_url=service.database_url).url_id == 2

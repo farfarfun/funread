@@ -278,6 +278,15 @@ class StaticFetcher:
         self._pages[url] = text
         return self
 
+    def close(self) -> None:
+        """没有资源要放，但得有这个方法 —— 调用方对真假 fetcher 一视同仁。"""
+
+    def __enter__(self) -> "StaticFetcher":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def fetch(self, request: Request) -> Page:
         from .errors import FetchError
 

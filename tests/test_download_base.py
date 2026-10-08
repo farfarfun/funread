@@ -6,8 +6,6 @@ import funread.legado.manage.download.sources.rss as rss_module
 import funread.legado.manage.download.task as generate_task_module
 import funread.legado.manage.source.check.task as check_module
 import funread.legado.manage.source.merge.task as merge_module
-
-from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
 from funread.legado.manage.download import (
     DownloadSourceDataTask,
     DumpSourceBackupTask,
@@ -17,6 +15,7 @@ from funread.legado.manage.download import (
     UploadSourceBatchesTask,
 )
 from funread.legado.manage.download.context import SourceBuildContext
+from funread.legado.manage.download.core import EXPORT_BATCH_SIZE, LocalSourceStore, SourceProcessor
 from funread.legado.manage.download.sources.book import BookSourceProcessor
 from funread.legado.manage.source import (
     SOURCE_STATUS_AVAILABLE,
@@ -1387,3 +1386,52 @@ def test_source_merge_runner_runs_merges_in_parallel(tmp_path: Path, monkeypatch
 
     assert stats == {"processed": 4, "merged": 4, "skipped": 0, "failed": 0}
     assert len(observed_threads) > 1
+
+
+# ---------------------------------------------------- 按 url_id 单取（阅读端入口）
+
+
+def test_load_by_url_id_reads_the_archived_wrapper(tmp_path: Path) -> None:
+    """阅读端只有 url_id，必须能直接定位到归档文件。
+
+    返回的是整个包装对象（`candidate`/`status`/...），不是裸源 —— 在多个候选版本
+    里挑哪个代表版是调用方的决定，store 不替它选。
+    """
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    target = Path(store.source_file_path(10000042))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '{"url_id": 10000042, "status": 2, "candidate": '
+        '[{"md5_list": ["m1"], "source": {"bookSourceName": "示例"}}]}',
+        encoding="utf-8",
+    )
+
+    data = store.load_by_url_id(10000042)
+
+    assert data is not None
+    assert data["status"] == 2
+    assert data["candidate"][0]["source"]["bookSourceName"] == "示例"
+
+
+def test_source_file_path_buckets_by_hundreds(tmp_path: Path) -> None:
+    """桶名算法必须和 sync 任务的 `_target_file_path` 一致，否则取不到文件。"""
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+
+    assert store.source_file_path(10000042).endswith("10000000-10000100/10000042.json")
+    assert store.source_file_path(99).endswith("0-100/99.json")
+
+
+def test_load_by_url_id_returns_none_for_missing_file(tmp_path: Path) -> None:
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+
+    assert store.load_by_url_id(12345678) is None
+
+
+def test_load_by_url_id_returns_none_for_corrupt_file(tmp_path: Path) -> None:
+    """归档有 13k+ 个文件，一个坏文件不能让阅读请求 500。"""
+    store = BookSourceProcessor(path=str(tmp_path), cate1="book")
+    target = Path(store.source_file_path(7))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{not json", encoding="utf-8")
+
+    assert store.load_by_url_id(7) is None
