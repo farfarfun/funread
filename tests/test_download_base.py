@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import funread.legado.manage.download.reporting.remote as remote_module
 import funread.legado.manage.download.sources.book as book_module
 import funread.legado.manage.download.sources.rss as rss_module
@@ -54,6 +56,20 @@ def test_loads_reads_url_map_from_source_table(tmp_path: Path) -> None:
 
     assert source.url_map == {"https://a.example": 10000007, "https://b.example": 10000008}
     assert source.current_id == 10000008
+
+
+def test_loads_propagates_database_errors(monkeypatch, tmp_path: Path) -> None:
+    source = DummySourceProcessor(
+        path=str(tmp_path), cate1="rss", database_url=f"sqlite:///{tmp_path / 'broken.db'}"
+    )
+
+    def fail_load(*_args, **_kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr("funread.legado.manage.load_source_detail_url_map", fail_load)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        source.loads()
 
 
 def test_url_index_writes_to_source_table(tmp_path: Path) -> None:

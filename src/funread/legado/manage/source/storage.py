@@ -113,6 +113,17 @@ SOURCE_DETAIL_ID_START = 10_000_000
 
 
 def normalize_source_status(status: int | None) -> int:
+    """规范化书源状态值。
+
+    Args:
+        status: 待校验的状态值；空值会使用待处理状态。
+
+    Returns:
+        合法的书源状态整数。
+
+    Raises:
+        ValueError: 状态值不在支持的范围内。
+    """
     normalized = int(status or SOURCE_STATUS_PENDING)
     if normalized not in VALID_SOURCE_STATUSES:
         raise ValueError(f"Invalid source status: {status}")
@@ -120,6 +131,17 @@ def normalize_source_status(status: int | None) -> int:
 
 
 def compute_url_md5(url: str) -> str:
+    """计算书源 URL 的 MD5 标识。
+
+    Args:
+        url: 需要计算摘要的非空 URL。
+
+    Returns:
+        URL 的 UTF-8 MD5 十六进制摘要。
+
+    Raises:
+        ValueError: URL 为空。
+    """
     if not url:
         raise ValueError("url is required")
     return hashlib.md5(url.encode("utf-8")).hexdigest()
