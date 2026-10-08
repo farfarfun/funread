@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 
 from farlog import getLogger
 from nicegui import ui
@@ -14,20 +15,45 @@ DEFAULT_PORT = 8080
 
 
 def show(event: ValueChangeEventArguments) -> None:
+    """显示控件值变更通知。
+
+    Args:
+        event: NiceGUI 触发的值变更事件。
+
+    Returns:
+        无返回值。
+    """
     name = type(event.sender).__name__
     ui.notify(f"{name}: {event.value}")
 
 
 def card(video: VideoInfo) -> None:
+    """渲染单个视频卡片。
+
+    Args:
+        video: 用于填充卡片的视频信息。
+
+    Returns:
+        无返回值。
+    """
     with ui.card():
         ui.image(video.pic_url)
         with ui.row():
             ui.link(video.text, video_page(video))
 
 
-def video_list_page(parse: ParseVideo, tab_id: int = 0):
+def video_list_page(parse: ParseVideo, tab_id: int = 0) -> Callable[..., None]:
+    """创建视频列表页面。
+
+    Args:
+        parse: 提供视频列表数据的解析器。
+        tab_id: 当前标签页标识，供调用方保留页面上下文。
+
+    Returns:
+        已注册到 NiceGUI 的视频列表页面处理函数。
+    """
     @ui.page("/videos")
-    def video_list_play(rows=10, cols=2):
+    def video_list_play(rows: int = 10, cols: int = 2) -> None:
         ui.button("Button", on_click=lambda: ui.notify("Click"))
         videos = parse.parse_video_list()
 
@@ -43,6 +69,17 @@ def video_list_page(parse: ParseVideo, tab_id: int = 0):
 
 
 def video_list_play(parse: ParseVideo, tab_id: int = 0, rows: int = 10, cols: int = 2) -> None:
+    """渲染视频列表内容。
+
+    Args:
+        parse: 提供视频列表数据的解析器。
+        tab_id: 当前标签页标识，供调用方保留页面上下文。
+        rows: 最多渲染的行数。
+        cols: 每行渲染的卡片数。
+
+    Returns:
+        无返回值。
+    """
     ui.button("Button", on_click=lambda: ui.notify("Click"))
     videos = parse.parse_video_list()
     logger.debug("视频列表已加载，共 {} 项", len(videos.video_list))
@@ -55,9 +92,18 @@ def video_list_play(parse: ParseVideo, tab_id: int = 0, rows: int = 10, cols: in
                 card(videos.video_list[index])
 
 
-def video_list_tabs_page(parse: ParseVideo, tab_id: int = 0):
+def video_list_tabs_page(parse: ParseVideo, tab_id: int = 0) -> Callable[..., None]:
+    """创建带标签页的视频列表页面。
+
+    Args:
+        parse: 提供标签和视频数据的解析器。
+        tab_id: 默认使用的标签页标识。
+
+    Returns:
+        已注册到 NiceGUI 的标签页页面处理函数。
+    """
     @ui.page("/videosssss")
-    def video_list_tabs_play(rows=10, cols=2):
+    def video_list_tabs_play(rows: int = 10, cols: int = 2) -> None:
         parse_tabs = parse.tabs()
         if len(parse_tabs) == 0:
             video_list_play(parse, tab_id=tab_id)

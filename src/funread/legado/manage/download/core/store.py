@@ -207,10 +207,8 @@ class LocalSourceStore:
             self.url_map = load_source_detail_url_map(
                 source_type=self.cate1, database_url=self.database_url
             )
-        except ValueError:
-            self.url_map = {}
-        except Exception as e:
-            logger.warning(f"Failed to load URL map from database: {e}")
+        except ValueError as exc:
+            logger.warning(f"Invalid URL map configuration, using an empty map: {exc}")
             self.url_map = {}
 
         self.current_id = max(self.url_map.values()) if self.url_map else DEFAULT_BACKUP_ID - 1
@@ -221,10 +219,8 @@ class LocalSourceStore:
             self.md5_set = load_source_index_map(
                 source_type=self.cate1, database_url=self.database_url
             )
-        except ValueError:
-            self.md5_set = {}
-        except Exception as e:
-            logger.warning(f"Failed to load source index from database: {e}")
+        except ValueError as exc:
+            logger.warning(f"Invalid source index configuration, using an empty map: {exc}")
             self.md5_set = {}
 
     def dumps(self) -> None:

@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
-# funread 唯一的长时间运行服务：NiceGUI 视频列表开发页面
-# (funread.web.page.video_list)。该服务目前仅是本地开发用的演示页面，
-# 没有独立发布的生产制品，也没有安装型 CLI 可以自行 daemonize，
-# 因此采用 bash-service-guide 文档中的 fallback 方案：
-# 由本脚本通过 nohup 后台拉起进程，并自行管理 PID 文件。
+# funread 唯一的长时间运行服务：NiceGUI 视频列表页面
+# (funread.web.page.video_list)。由本脚本通过 nohup 后台拉起进程，并自行
+# 管理 PID 文件。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${ROOT}/.run"
-PID_FILE="${RUN_DIR}/web.pid"
-LOG_FILE="${RUN_DIR}/web.log"
-PORT="${FUNREAD_WEB_PORT:-8080}"
 MODULE="funread.web.page.video_list"
 START_GRACE_SECONDS=1
 
-readonly ROOT RUN_DIR PID_FILE LOG_FILE PORT MODULE START_GRACE_SECONDS
+readonly ROOT MODULE START_GRACE_SECONDS
 
 usage() {
-  printf 'Usage: %s <start|stop|restart|run|status>\n' "${0##*/}" >&2
+  printf 'Usage: %s <start|stop|restart|run|status> <dev|prod>\n' "${0##*/}" >&2
 }
 
 die() {
@@ -31,6 +25,60 @@ python_bin() {
   else
     command -v python3 || command -v python || die "python interpreter not found"
   fi
+}
+
+configure_environment() {
+  ENVIRONMENT="$1"
+  RUN_DIR="${ROOT}/.run/${ENVIRONMENT}"
+  PID_FILE="${RUN_DIR}/web.pid"
+  LOG_FILE="${RUN_DIR}/web.log"
+
+  case "${ENVIRONMENT}" in
+    dev)
+      PORT="${FUNREAD_WEB_PORT_DEV:-${FUNREAD_WEB_PORT:-8080}}"
+      WORK_DIR="${ROOT}"
+      ;;
+    prod)
+      PORT="${FUNREAD_WEB_PORT_PROD:-${FUNREAD_WEB_PORT:-8080}}"
+      # Do not leave the repository on sys.path when serving an installed package.
+      WORK_DIR="/"
+      ;;
+    *)
+      usage
+      die "environment must be dev or prod"
+      ;;
+  esac
+}
+
+assert_production_package() {
+  local py="$1"
+  if ! (
+    cd / && "${py}" -c '
+from importlib.metadata import version
+import os
+import sys
+import funread
+import importlib
+
+root = os.path.realpath(sys.argv[1])
+origin = os.path.realpath(funread.__file__ or "")
+version("funread")
+if not origin or os.path.commonpath((root, origin)) == root:
+    raise SystemExit("funread must be installed as a non-editable package")
+importlib.import_module("funread.web.page.video_list")
+' "${ROOT}"
+  ); then
+    die "prod requires an installed, non-editable funread package with the web extra"
+  fi
+}
+
+runtime_python() {
+  local py
+  py="$(python_bin)"
+  if [[ "${ENVIRONMENT}" == "prod" ]]; then
+    assert_production_package "${py}"
+  fi
+  printf '%s\n' "${py}"
 }
 
 is_pid_alive() {
@@ -54,9 +102,10 @@ do_start() {
   fi
 
   local py
-  py="$(python_bin)"
+  py="$(runtime_python)"
   local -a command=("${py}" -m "${MODULE}")
 
+  cd "${WORK_DIR}"
   FUNREAD_WEB_PORT="${PORT}" nohup "${command[@]}" </dev/null >>"${LOG_FILE}" 2>&1 &
   local pid=$!
   echo "${pid}" > "${PID_FILE}"
@@ -71,8 +120,8 @@ do_start() {
 
 do_run() {
   local py
-  py="$(python_bin)"
-  cd "${ROOT}"
+  py="$(runtime_python)"
+  cd "${WORK_DIR}"
   FUNREAD_WEB_PORT="${PORT}" exec "${py}" -m "${MODULE}"
 }
 
@@ -117,13 +166,15 @@ do_status() {
 
 main() {
   local action="${1:-}"
+  local environment="${2:-}"
 
   case "${action}" in
     start|stop|restart|run|status)
-      (( $# == 1 )) || {
+      (( $# == 2 )) || {
         usage
-        die "${action} takes no further arguments"
+        die "${action} requires exactly one environment argument"
       }
+      configure_environment "${environment}"
       "do_${action}"
       ;;
     *)
