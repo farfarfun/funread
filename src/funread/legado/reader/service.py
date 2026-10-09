@@ -12,7 +12,9 @@
 """
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from farlog import getLogger
@@ -33,10 +35,34 @@ from .registry import SourceRegistry
 
 logger = getLogger("funread")
 
-#  一次聚合搜索最多打几个源 / 几个并发。并发别调太高：这些都是小站，
-#  打太狠既容易被限流，也会让慢源拖住整批的收尾。
-DEFAULT_SEARCH_SOURCES = 12
-DEFAULT_SEARCH_WORKERS = 6
+#  一次聚合搜索最多试几个源。
+#
+#  这个数字曾经是 12，而书源池实测有 **5,606 个可用源** —— 只打 12 个等于 0.2%，
+#  而源语料大面积失效（实测 150 个标着可用的源里只有 6 个真能跑通四段流程），
+#  所以 12 个里很可能一个都答不上来，表现成「这本书搜不到」。
+#
+#  但也不能全试：5,606 个 × 最长 12 秒超时，就算 24 并发也要几十分钟。所以是
+#  「分波搜 + 三条终止线」，见 `search_report`。
+DEFAULT_SEARCH_SOURCES = 400
+
+#  并发数。比原来的 6 高一截 —— 瓶颈在等待响应而不在本机带宽，而且每个源是
+#  不同的站点，并发打它们不会集中压到某一家。再往上调收益递减：慢源的尾巴
+#  会越来越长，而 `SEARCH_BUDGET_SECONDS` 本来就会把它们截掉。
+DEFAULT_SEARCH_WORKERS = 24
+
+#  一波的大小。等于并发数，所以每一波都是一次满并发、一起收口。
+SEARCH_WAVE_SIZE = DEFAULT_SEARCH_WORKERS
+
+#  整轮搜索的墙钟预算（秒）。超了就把已有结果返回 —— **不是报错**。
+#  热门书通常第一波就够，冷门书会一直搜到这条线为止。
+SEARCH_BUDGET_SECONDS = 25.0
+
+#  有这么多个源答出了结果就停。再往下搜只是把同一本书的来源列表堆长 ——
+#  对「找到这本书」没有增量，对换源才有（所以那条路径用更大的值）。
+SEARCH_ENOUGH_HITS = 8
+
+#  换源要的是尽可能多的来源，所以目标高一些。
+SWITCH_ENOUGH_HITS = 20
 
 #  单个源的抓取超时。聚合搜索是「谁先回谁算」，慢源不值得等。
 SEARCH_TIMEOUT = (6, 12)
@@ -156,63 +182,115 @@ class ReaderService:
         keyword: str,
         max_sources: int = DEFAULT_SEARCH_SOURCES,
         workers: int = DEFAULT_SEARCH_WORKERS,
+        enough_hits: int = SEARCH_ENOUGH_HITS,
+        budget: float = SEARCH_BUDGET_SECONDS,
     ) -> Dict[str, Any]:
-        """跨源聚合搜索，连带返回这一轮的源统计。
+        """跨源聚合搜索，分波进行，连带返回这一轮的源统计。
 
         按 `书名+作者` 合并同一本书的多个来源。返回顺序是「命中的源最多的排前面」：
         被多个站点同时收录的书，通常既是用户要找的那本，也更有换源余地。
 
-        统计是给前端用的 —— 聚合搜索慢且会有大量单源失败，没有这组数字时「搜不到」
-        和「十个源里九个需要 JS」在界面上长得一模一样，用户只会以为是 bug。
+        ## 为什么分波
+
+        书源池实测有 5,606 个可用源，而实跑可用率只有个位数百分比 —— 只打十几个源
+        很可能一个都答不上来，表现成「这本书搜不到」。但全试也不行：5,606 × 最长
+        12 秒，24 并发也要几十分钟。
+
+        所以按 `SEARCH_WAVE_SIZE` 一波一波搜，**三条终止线任一触发就停**：
+
+        1. `enough_hits` 个源答出了结果 —— 够用了，再搜只是把来源列表堆长；
+        2. 墙钟超过 `budget` —— 把已有结果返回，不报错；
+        3. 试过的源达到 `max_sources`，或候选池本来就搜完了。
+
+        候选池的顺序是「实跑成功过的排最前」（见 `list_source_prefs` 的 ORDER BY），
+        所以用得越久第一波的命中率越高 —— 这是分波能快的前提。
+
+        ## 统计字段
+
+        给前端用的。聚合搜索慢且会有大量单源失败，没有这组数字时「搜不到」和
+        「试的源全挂了」在界面上长得一模一样，用户只会以为是 bug。
         `js_skipped` 单独计：那是结构性不支持，换关键词也没用。
+        `exhausted` 为真表示候选池真的搜完了 —— 此时「没搜到」是确定的结论，
+        而不是「还没搜到那么深」。
         """
         keyword = (keyword or "").strip()
-        stats = {"sources_tried": 0, "sources_ok": 0, "js_skipped": 0, "failed": 0}
+        stats = {
+            "sources_tried": 0,
+            "sources_ok": 0,
+            "hits": 0,
+            "js_skipped": 0,
+            "failed": 0,
+            "waves": 0,
+            "elapsed": 0.0,
+            "exhausted": False,
+            "stopped_by": "empty",
+        }
         if not keyword:
             return {"items": [], "total": 0, **stats}
 
-        candidates = self.registry.candidates(limit=max_sources)
-        if not candidates:
-            return {"items": [], "total": 0, **stats}
-        stats["sources_tried"] = len(candidates)
-
         aggregated: Dict[str, AggregatedBook] = {}
         order: List[str] = []
+        started = time.monotonic()
+        pool = self.registry.iter_candidates()
+        wave_size = max(1, min(workers, SEARCH_WAVE_SIZE))
+        stopped_by = "exhausted"
 
         def _search_one(item: Tuple[int, SourceSpec]) -> Tuple[int, List[SearchBook]]:
             url_id, spec = item
-            books = self._run(
+            return url_id, self._run(
                 url_id, spec, lambda engine: engine.search(keyword), timeout=SEARCH_TIMEOUT
             )
-            return url_id, books
 
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(candidates)))) as pool:
-            futures = [pool.submit(_search_one, item) for item in candidates]
-            for future in as_completed(futures):
-                try:
-                    url_id, books = future.result()
-                except (JsNotSupportedError, UnsupportedFeatureError) as exc:
-                    #  结构性不支持，和「站点这次抽风」是两回事，要分开报给前端
-                    stats["js_skipped"] += 1
-                    logger.debug(f"Search skipped a source needing JS: {exc}")
-                    continue
-                except Exception as exc:
-                    #  单源失败是常态，已经记进 fail_count 了，这里只留个 debug
-                    stats["failed"] += 1
-                    logger.debug(f"Search failed on one source: {exc}")
-                    continue
-                stats["sources_ok"] += 1
-                for book in books:
-                    if not book.name.strip():
+        while stats["sources_tried"] < max_sources:
+            remaining = max_sources - stats["sources_tried"]
+            wave = list(islice(pool, min(wave_size, remaining)))
+            if not wave:
+                stats["exhausted"] = True
+                stopped_by = "exhausted"
+                break
+
+            stats["waves"] += 1
+            stats["sources_tried"] += len(wave)
+            with ThreadPoolExecutor(max_workers=max(1, min(workers, len(wave)))) as executor:
+                futures = [executor.submit(_search_one, item) for item in wave]
+                for future in as_completed(futures):
+                    try:
+                        url_id, books = future.result()
+                    except (JsNotSupportedError, UnsupportedFeatureError) as exc:
+                        #  结构性不支持，和「站点这次抽风」是两回事，分开报给前端
+                        stats["js_skipped"] += 1
+                        logger.debug(f"Search skipped a source needing JS: {exc}")
                         continue
-                    key = storage.compute_book_key(book.name, book.author)
-                    with self._lock:
-                        if key in aggregated:
-                            aggregated[key].merge(book, url_id)
-                        else:
-                            aggregated[key] = AggregatedBook(book, url_id)
-                            order.append(key)
+                    except Exception as exc:
+                        #  单源失败是常态，已经记进 fail_count 了，这里只留个 debug
+                        stats["failed"] += 1
+                        logger.debug(f"Search failed on one source: {exc}")
+                        continue
+                    stats["sources_ok"] += 1
+                    usable = [book for book in books if book.name.strip()]
+                    if usable:
+                        stats["hits"] += 1
+                    for book in usable:
+                        key = storage.compute_book_key(book.name, book.author)
+                        with self._lock:
+                            if key in aggregated:
+                                aggregated[key].merge(book, url_id)
+                            else:
+                                aggregated[key] = AggregatedBook(book, url_id)
+                                order.append(key)
 
+            #  终止线按「代价从小到大」判：够了最省，超预算次之，源用完最后。
+            if stats["hits"] >= enough_hits:
+                stopped_by = "enough"
+                break
+            if time.monotonic() - started >= budget:
+                stopped_by = "budget"
+                break
+        else:
+            stopped_by = "max_sources"
+
+        stats["elapsed"] = round(time.monotonic() - started, 2)
+        stats["stopped_by"] = stopped_by
         results = [aggregated[key] for key in order]
         results.sort(key=lambda item: len(item.sources), reverse=True)
         items = [item.to_dict() for item in results]
@@ -231,19 +309,80 @@ class ReaderService:
         self,
         book_key: str,
         user_id: int = storage.LOCAL_USER_ID,
-    ) -> List[Dict[str, Any]]:
+        enough_hits: int = SWITCH_ENOUGH_HITS,
+        budget: float = SEARCH_BUDGET_SECONDS,
+    ) -> Dict[str, Any]:
         """换源列表：这本书还能在哪些源下读。
 
         书架上只记了「当前在读的源」，别的来源不会落库 —— 真实的换源列表要靠
-        重新搜一次得到，所以这里按书名反查。
+        **重新搜一次**得到，所以这里按书名跑一轮聚合搜索再筛。
+
+        ## 为什么不按 `book_key` 精确筛
+
+        `book_key = md5(书名\n作者)`。按它精确筛会**静默丢掉**一批真的有这本书的
+        源 —— 作者名写法稍有差异就是另一个 key：空作者、繁简不同、「烽火戏诸侯」
+        写成「烽火戏诸候」、或者带了「（著）」。实测这类差异很常见，而被丢掉的源
+        往往恰恰是还活着的那些。
+
+        所以改成**按书名宽松匹配**，把候选都列出来、标注作者和最新章节，让用户
+        自己判断哪个是同一本。`exact` 字段标明是不是 `book_key` 完全一致 ——
+        界面可以把精确的排前面，但不该把其余的藏起来。
+
+        返回的是一个报告（含搜索统计），不是裸列表：界面要能解释「为什么换源列表
+        是空的」—— 是真没有别的源，还是这一轮试的源都没答上来。
         """
         book = storage.get_shelf_book(book_key, user_id=user_id, database_url=self.database_url)
         if book is None:
-            return []
-        for item in self.search(book.name):
-            if item["book_key"] == book_key:
-                return item["sources"]
-        return []
+            raise LookupError("书架里没有这本书")
+
+        report = self.search_report(book.name, enough_hits=enough_hits, budget=budget)
+        wanted = matching.normalize_chapter_name(book.name)
+        current_url_id = int(book.url_id or 0)
+
+        items: List[Dict[str, Any]] = []
+        for candidate in report["items"]:
+            #  书名归一化后不同就不是同一本 —— 搜索是模糊的，「仙逆」会搜出
+            #  「仙逆之再生」这类同前缀的书，不能当成换源选项。
+            if matching.normalize_chapter_name(candidate["name"]) != wanted:
+                continue
+            exact = candidate["book_key"] == book_key
+            for source in candidate["sources"]:
+                items.append(
+                    {
+                        "url_id": source["url_id"],
+                        "source_name": source["source_name"],
+                        "book_url": source["book_url"],
+                        "name": candidate["name"],
+                        "author": candidate["author"],
+                        "last_chapter": candidate["last_chapter"],
+                        #  book_key 完全一致 = 书名与作者都对得上
+                        "exact": exact,
+                        "current": source["url_id"] == current_url_id,
+                    }
+                )
+
+        #  精确匹配排前面；其中当前在读的那个再往前 —— 用户要先看到自己现在在哪
+        items.sort(key=lambda item: (not item["exact"], not item["current"]))
+        return {
+            "items": items,
+            "total": len(items),
+            "book_key": book_key,
+            "name": book.name,
+            **{
+                key: report[key]
+                for key in (
+                    "sources_tried",
+                    "sources_ok",
+                    "hits",
+                    "js_skipped",
+                    "failed",
+                    "waves",
+                    "elapsed",
+                    "exhausted",
+                    "stopped_by",
+                )
+            },
+        }
 
     # ------------------------------------------------------------------ 四段
 
@@ -489,6 +628,10 @@ class ReaderService:
 __all__ = [
     "DEFAULT_SEARCH_SOURCES",
     "DEFAULT_SEARCH_WORKERS",
+    "SEARCH_BUDGET_SECONDS",
+    "SEARCH_ENOUGH_HITS",
+    "SEARCH_WAVE_SIZE",
+    "SWITCH_ENOUGH_HITS",
     "AggregatedBook",
     "ReaderService",
 ]

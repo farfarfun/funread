@@ -173,14 +173,27 @@ class SourceRegistry:
         url_id），所以多取一些再按装载结果截断，而不是直接拿表里的前 N 条。
         """
         picked: List[Tuple[int, SourceSpec]] = []
-        for pref in self.prefs(limit=max(limit * 3, limit + 10)):
-            spec = self.load_spec(pref.url_id)
-            if spec is None:
-                continue
-            picked.append((int(pref.url_id), spec))
+        for item in self.iter_candidates():
+            picked.append(item)
             if len(picked) >= limit:
                 break
         return picked
+
+    def iter_candidates(self) -> Iterator[Tuple[int, SourceSpec]]:
+        """按候选池顺序惰性产出 `(url_id, spec)`，跳过装载不出来的。
+
+        生成器而不是列表：书源池实测有 5,606 个可用源，一次把它们的 JSON 全读进来
+        解析既慢又占内存，而分波搜索通常在前几波就停了 —— 后面那几千个压根不该被
+        读到磁盘。
+
+        顺序来自 `list_source_prefs` 的 ORDER BY：**实跑成功过的排最前**。所以用得
+        越久，搜索命中得越快 —— 能用的源会浮到池子顶部。
+        """
+        for pref in self.prefs(limit=None):
+            spec = self.load_spec(pref.url_id)
+            if spec is None:
+                continue
+            yield int(pref.url_id), spec
 
 
 __all__ = ["SCAN_BATCH_SIZE", "SOURCE_STATUS_AVAILABLE", "SourceRegistry"]

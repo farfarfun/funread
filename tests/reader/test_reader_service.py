@@ -316,3 +316,198 @@ def test_switching_source_clears_the_cache(make_service):
 
     assert storage.get_cached_chapter(book_key, 1, database_url=service.database_url) is None
     assert storage.get_shelf_book(book_key, database_url=service.database_url).url_id == 2
+
+
+# ------------------------------------------------------------------ 分波搜索
+
+
+def _many_sources(count, host_prefix="s"):
+    return {i: _source(f"{host_prefix}{i}.example.com", f"源{i}") for i in range(1, count + 1)}
+
+
+def _pages_for(sources, keyword, rows):
+    """给每个源都造一个能搜到 rows 的页面。"""
+    return {
+        f"https://{host_prefix}/s?q={keyword}": _search_html(rows)
+        for host_prefix in (
+            source["bookSourceUrl"].removeprefix("https://") for source in sources.values()
+        )
+    }
+
+
+def test_search_stops_once_enough_sources_answered(make_service):
+    """够了就停 —— 再往下搜只是把同一本书的来源列表堆长。"""
+    sources = _many_sources(60)
+    service = make_service(
+        pages=_pages_for(sources, "剑来", [("剑来", "烽火戏诸侯")]),
+        sources=sources,
+    )
+
+    report = service.search_report("剑来", enough_hits=5)
+
+    assert report["stopped_by"] == "enough"
+    assert report["hits"] >= 5
+    #  一波 24 个，所以第一波就够了 —— 不该把 60 个都试完
+    assert report["sources_tried"] < 60
+    assert report["waves"] == 1
+
+
+def test_search_walks_more_waves_when_the_early_sources_are_dead(make_service):
+    """这是把上限从 12 提到分波搜的全部意义：前面的源死了也要能找到书。"""
+    sources = _many_sources(40)
+    #  只有第 40 个源有这本书，其余全部抓取失败（StaticFetcher 里没有它们的 URL）
+    service = make_service(
+        pages={"https://s40.example.com/s?q=仙逆": _search_html([("仙逆", "耳根")])},
+        sources=sources,
+    )
+
+    report = service.search_report("仙逆", enough_hits=5)
+
+    assert [item["name"] for item in report["items"]] == ["仙逆"]
+    assert report["waves"] >= 2
+    assert report["failed"] >= 30
+    assert report["hits"] == 1
+
+
+def test_search_respects_the_source_cap(make_service):
+    sources = _many_sources(60)
+    service = make_service(pages={}, sources=sources)
+
+    report = service.search_report("查无此书", max_sources=30, enough_hits=99)
+
+    assert report["sources_tried"] == 30
+    assert report["stopped_by"] == "max_sources"
+    assert report["exhausted"] is False
+
+
+def test_search_reports_an_exhausted_pool(make_service):
+    """池子搜完了，「没搜到」才是确定的结论而不是「还没搜到那么深」。"""
+    sources = _many_sources(3)
+    service = make_service(pages={}, sources=sources)
+
+    report = service.search_report("查无此书", enough_hits=99)
+
+    assert report["exhausted"] is True
+    assert report["stopped_by"] == "exhausted"
+    assert report["sources_tried"] == 3
+
+
+def test_search_respects_the_wall_clock_budget(make_service, monkeypatch):
+    """超预算是把已有结果返回，不是报错。"""
+    sources = _many_sources(60)
+    service = make_service(
+        pages=_pages_for(sources, "剑来", [("剑来", "烽火戏诸侯")]),
+        sources=sources,
+    )
+    #  预算设成 0：第一波跑完就必然超
+    report = service.search_report("剑来", enough_hits=99, budget=0.0)
+
+    assert report["stopped_by"] == "budget"
+    assert report["waves"] == 1
+    #  已有结果照常返回
+    assert [item["name"] for item in report["items"]] == ["剑来"]
+
+
+def test_search_records_elapsed_and_waves(make_service):
+    sources = _many_sources(5)
+    service = make_service(
+        pages=_pages_for(sources, "剑来", [("剑来", "烽火戏诸侯")]), sources=sources
+    )
+
+    report = service.search_report("剑来")
+
+    assert report["elapsed"] >= 0
+    assert report["waves"] == 1
+    assert report["sources_ok"] == 5
+
+
+# ------------------------------------------------------------------ 换源列表
+
+
+def test_sources_for_finds_sources_whose_author_spelling_differs(make_service):
+    """按 book_key 精确筛会静默丢掉这些源 —— 而它们往往恰恰是还活着的那批。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=仙逆": _search_html([("仙逆", "耳根")]),
+            #  作者空着
+            "https://b.example.com/s?q=仙逆": _search_html([("仙逆", "")]),
+            #  作者多了「（著）」
+            "https://c.example.com/s?q=仙逆": _search_html([("仙逆", "耳根（著）")]),
+        },
+        sources={
+            1: _source("a.example.com", "甲源"),
+            2: _source("b.example.com", "乙源"),
+            3: _source("c.example.com", "丙源"),
+        },
+    )
+    book_key = service.add_to_shelf(
+        {"name": "仙逆", "author": "耳根", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+
+    report = service.sources_for(book_key)
+
+    assert {item["url_id"] for item in report["items"]} == {1, 2, 3}
+    #  精确命中的标出来，但其余的不藏
+    exact = {item["url_id"] for item in report["items"] if item["exact"]}
+    assert exact == {1}
+    #  精确的排前面
+    assert report["items"][0]["exact"] is True
+
+
+def test_sources_for_marks_the_current_source(make_service):
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=仙逆": _search_html([("仙逆", "耳根")]),
+            "https://b.example.com/s?q=仙逆": _search_html([("仙逆", "耳根")]),
+        },
+        sources={1: _source("a.example.com", "甲源"), 2: _source("b.example.com", "乙源")},
+    )
+    book_key = service.add_to_shelf(
+        {"name": "仙逆", "author": "耳根", "url_id": 2, "book_url": "https://b.example.com/b/0"}
+    )
+
+    report = service.sources_for(book_key)
+    current = [item for item in report["items"] if item["current"]]
+
+    assert [item["url_id"] for item in current] == [2]
+    #  当前在读的排最前 —— 用户要先看到自己现在在哪
+    assert report["items"][0]["current"] is True
+
+
+def test_sources_for_excludes_merely_similar_titles(make_service):
+    """搜索是模糊的，「仙逆」会搜出同前缀的别的书，那些不是换源选项。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/s?q=仙逆": _search_html([("仙逆", "耳根")]),
+            "https://b.example.com/s?q=仙逆": _search_html([("仙逆之再生", "跟风者")]),
+        },
+        sources={1: _source("a.example.com", "甲源"), 2: _source("b.example.com", "乙源")},
+    )
+    book_key = service.add_to_shelf(
+        {"name": "仙逆", "author": "耳根", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+
+    report = service.sources_for(book_key)
+
+    assert {item["url_id"] for item in report["items"]} == {1}
+
+
+def test_sources_for_carries_the_search_stats(make_service):
+    """界面要能解释「为什么换源列表是空的」—— 真没有，还是试的源都挂了。"""
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = service.add_to_shelf(
+        {"name": "仙逆", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+
+    report = service.sources_for(book_key)
+
+    assert report["items"] == []
+    assert report["sources_tried"] >= 1
+    assert report["sources_ok"] == 0
+    assert report["exhausted"] is True
+
+
+def test_sources_for_on_a_book_not_on_the_shelf_raises(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    with pytest.raises(LookupError):
+        service.sources_for("不存在的key")
