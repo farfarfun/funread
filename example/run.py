@@ -3,10 +3,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tqdm import tqdm
+
 from funread.legado.manage.download import GenerateSourceTask
 from funread.legado.manage.publish import UpdateEntrance
-
-from tqdm import tqdm
 from funread.legado.manage.source import add_source_list_url
 
 

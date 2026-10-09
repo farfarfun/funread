@@ -1,12 +1,11 @@
-"""HTML report builder for source snapshots."""
+"""源快照 HTML 报告生成器。"""
 
-from datetime import datetime
-from typing import Any, Dict
 import traceback
+from datetime import datetime
+from typing import Any
 
 from dominate.tags import *
 from farlog import getLogger
-
 
 logger = getLogger("funread")
 
@@ -16,18 +15,21 @@ ORG_REPOS = [
     ("funread", "farfarfun/funread"),
 ]
 
+# 注意：订阅源必须指向 funread-cache 里实际生成的快照文件
+# （funread/legado/snapshot/lasted/funread.json），不存在的
+# funread/legado/rss/rss-main.json 会导致导入页链接全部失效（#743）。
 RSS_SOURCES = [
     {
         "label": "github",
-        "href": "yuedu://rssSource/importonline?src=https://github.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+        "href": "yuedu://rssSource/importonline?src=https://github.com/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/funread.json",
     },
     {
         "label": "gitee",
-        "href": "yuedu://rssSource/importonline?src=https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+        "href": "yuedu://rssSource/importonline?src=https://gitee.com/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/funread.json",
     },
     {
         "label": "gitlink",
-        "href": "yuedu://rssSource/importonline?src=https://gitlink.org.cn/farfarfun/funread-cache/raw/master/funread/legado/rss/rss-main.json",
+        "href": "yuedu://rssSource/importonline?src=https://gitlink.org.cn/farfarfun/funread-cache/raw/master/funread/legado/snapshot/lasted/funread.json",
     },
 ]
 
@@ -98,7 +100,7 @@ class SourceReportBuilder:
             return f"{int(value)} {units[unit_index]}"
         return f"{value:.1f} {units[unit_index]}"
 
-    def extract_source_count(self, file: Dict[str, Any]) -> str:
+    def extract_source_count(self, file: dict[str, Any]) -> str:
         fid = str(file.get("fid", ""))
         name = str(file.get("name", ""))
         if not name.endswith(".json"):
@@ -122,7 +124,7 @@ class SourceReportBuilder:
             th("github")
             th("gitee")
 
-    def fill_table_data(self, file: Dict[str, Any]) -> None:
+    def fill_table_data(self, file: dict[str, Any]) -> None:
         data_tr = tr()
         data_tr += td(file["name"])
         data_tr += td(self.extract_source_count(file))

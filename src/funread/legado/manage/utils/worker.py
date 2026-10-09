@@ -1,7 +1,7 @@
 """Shared funworker producer/consumer helpers for source batch tasks."""
 
 from collections import Counter
-from typing import Any, Iterator, List
+from typing import Any, Iterator
 
 from funworker import BaseConsumer, BaseProducer
 
@@ -9,7 +9,7 @@ from funworker import BaseConsumer, BaseProducer
 class ListProducer(BaseProducer):
     """Produce items from a pre-computed list, then stop."""
 
-    def __init__(self, output_queue, items: List[Any], **kwargs):
+    def __init__(self, output_queue, items: list[Any], **kwargs):
         super().__init__(output_queue=output_queue, **kwargs)
         self._iterator: Iterator[Any] = iter(items)
 

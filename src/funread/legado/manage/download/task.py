@@ -1,6 +1,6 @@
 """Source generation orchestration task."""
 
-from typing import Any, Dict
+from typing import Any
 
 from farlog import getLogger
 
@@ -41,7 +41,7 @@ class GenerateSourceTask:
             repo=self.repo_str,
         )
 
-    def build_runtime(self, source_type: str) -> Dict[str, Any]:
+    def build_runtime(self, source_type: str) -> dict[str, Any]:
         context = self.build_context(source_type)
         path = self.get_cache_root()
         database_url = resolve_database_url()
@@ -67,7 +67,7 @@ class GenerateSourceTask:
         publish: bool = False,
         *args,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         runtime = self.build_runtime(source_type)
         context = runtime["context"]
         store = runtime["store"]

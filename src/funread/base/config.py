@@ -35,21 +35,29 @@ def _fallback_to_default() -> str:
     return DEFAULT_DATABASE_URL
 
 
+#: Errors that mean "no secret configured here", as opposed to "the secret
+#: store malfunctioned". Only the former falls back -- a broken store must stay
+#: loud, otherwise a misconfigured host silently writes to local SQLite while
+#: the operator believes it is on the configured database.
+_SECRET_ABSENT = (ImportError, KeyError, ValueError)
+
+
 def _read_secret(*, cate3: str, cate4: str) -> str | None:
     try:
         from funsecret import read_secret
 
         return read_secret(cate1="funread", cate2="cache", cate3=cate3, cate4=cate4)
-    except Exception as exc:
-        logger.debug(f"Failed to read funread/cache/{cate3}/{cate4} from funsecret: {exc}")
+    except _SECRET_ABSENT as exc:
+        logger.debug(f"funread/cache/{cate3}/{cate4} not configured in funsecret: {exc}")
         return None
 
 
 def resolve_database_url() -> str:
     """Resolve the database URL to use, falling back to local SQLite.
 
-    Never raises: funsecret being unconfigured or unavailable falls back to
-    ``DEFAULT_DATABASE_URL`` instead of failing the caller.
+    funsecret being *unconfigured* falls back to ``DEFAULT_DATABASE_URL``
+    instead of failing the caller. A secret store that *malfunctions* raises --
+    silently falling back would hide which database the process is writing to.
     """
     env_value = os.environ.get("FUNREAD_DATABASE_URL")
     if env_value:
@@ -65,9 +73,11 @@ def resolve_database_url() -> str:
 def resolve_cache_root() -> str:
     """Resolve the source-file cache root, falling back to the user cache dir.
 
-    Never raises. The pipeline tasks used to read funsecret directly with no
-    fallback, which made them unusable from a process that has no secret store
-    configured (the API server, a fresh clone, CI).
+    Falls back when funsecret is unconfigured. The pipeline tasks used to read
+    funsecret directly with no fallback, which made them unusable from a
+    process that has no secret store configured (the API server, a fresh
+    clone, CI). A malfunctioning store raises, same as
+    :func:`resolve_database_url`.
     """
     env_value = os.environ.get("FUNREAD_CACHE_ROOT")
     if env_value:

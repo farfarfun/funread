@@ -2,7 +2,6 @@
 
 from .check import CheckSourceStatusTask, SourceStatusCheckRunner
 from .merge import MergeSourceTask, OpenAICompatibleSourceMerger, SourceMergeRunner
-from .sync import SyncLocalSourceRecordsTask
 from .storage import (
     SOURCE_STATUS_AVAILABLE,
     SOURCE_STATUS_BLACKLISTED,
@@ -17,15 +16,16 @@ from .storage import (
     init_source_db,
     iter_source_list_data,
     list_source_detail_records,
-    load_source_index_map,
-    load_source_detail_url_map,
     load_source_detail_status_map,
+    load_source_detail_url_map,
+    load_source_index_map,
     replace_source_detail_records,
     replace_source_index_records,
-    upsert_source_index_records,
     upsert_source_detail_record,
+    upsert_source_index_records,
     upsert_source_list_record,
 )
+from .sync import SyncLocalSourceRecordsTask
 
 __all__ = [
     "CheckSourceStatusTask",

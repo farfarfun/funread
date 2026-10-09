@@ -1,4 +1,5 @@
 import funsecret
+import pytest
 
 import funread.base.config as config
 
@@ -21,7 +22,7 @@ def test_database_url_falls_back_to_local_sqlite(monkeypatch, tmp_path):
     database_path = tmp_path / "cache" / "funread.db"
     monkeypatch.delenv("FUNREAD_DATABASE_URL", raising=False)
     monkeypatch.setattr(
-        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError())
+        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(KeyError())
     )
     monkeypatch.setattr(config, "DEFAULT_DATABASE_PATH", database_path)
     monkeypatch.setattr(config, "DEFAULT_DATABASE_URL", f"sqlite:///{database_path}")
@@ -49,9 +50,20 @@ def test_cache_root_falls_back_without_secret_store(monkeypatch, tmp_path):
     cache_root = tmp_path / "cache" / "hub"
     monkeypatch.delenv("FUNREAD_CACHE_ROOT", raising=False)
     monkeypatch.setattr(
-        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError())
+        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(KeyError("db_url"))
     )
     monkeypatch.setattr(config, "DEFAULT_CACHE_ROOT", cache_root)
 
     assert config.resolve_cache_root() == str(cache_root)
     assert cache_root.is_dir()
+
+
+def test_database_url_propagates_secret_system_failure(monkeypatch):
+    """secret store 坏掉跟没配是两回事：前者必须响，不能默默跑到本地 SQLite。"""
+    monkeypatch.delenv("FUNREAD_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        funsecret, "read_secret", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("broken"))
+    )
+
+    with pytest.raises(RuntimeError, match="broken"):
+        config.resolve_database_url()

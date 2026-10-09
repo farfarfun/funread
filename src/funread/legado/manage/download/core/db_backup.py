@@ -11,7 +11,6 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from farlog import getLogger
 
@@ -20,7 +19,7 @@ from funread.base.config import resolve_database_url, sqlite_path
 logger = getLogger("funread")
 
 
-def backup_sqlite_database(dest_dir: str) -> Optional[str]:
+def backup_sqlite_database(dest_dir: str) -> str | None:
     database_url = resolve_database_url()
     source_path = sqlite_path(database_url)
     if source_path is None:
