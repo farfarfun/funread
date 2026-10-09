@@ -305,6 +305,70 @@ class ReaderService:
         """只要结果、不要统计时的薄包装。"""
         return self.search_report(keyword, max_sources=max_sources, workers=workers)["items"]
 
+    # ------------------------------------------------------------------ 发现
+
+    def explore_sources(self, limit: int = 50, offset: int = 0, q: str = "") -> Dict[str, Any]:
+        """能浏览分类的源。
+
+        引擎的 `explore()` 从 M1 就实现了，但一直没有服务层入口 —— 这是接上它的
+        第一步。抽样实测 **54.9% 的书源带发现页规则**，其中纯 Python 可跑的占
+        19.3%（全量折算约 2,500 个源）。
+
+        只查表（`has_explore` 列在扫描时算好），**不读源文件** —— 否则列个源表就要
+        现场解析几千个 JSON。分类名要读文件，所以只给当前这一页补。
+        """
+        keyword = (q or "").strip()
+        rows = self.registry.prefs(limit=None, explore_only=True)
+        items = [
+            {"url_id": int(pref.url_id), "name": pref.name or f"源 {pref.url_id}"}
+            for pref in rows
+            if not keyword or keyword in (pref.name or "")
+        ]
+        total = len(items)
+        window = items[offset : offset + limit]
+        for item in window:
+            spec = self.registry.load_spec(item["url_id"])
+            item["kinds"] = (
+                [kind.name for kind in spec.explore_kinds() if kind.name] if spec else []
+            )
+        return {"items": window, "total": total, "limit": limit, "offset": offset}
+
+    def explore_kinds(self, url_id: int) -> List[Dict[str, str]]:
+        """一个源的发现页分类。零网络 —— `exploreUrl` 是源 JSON 里的静态字段。
+
+        `url` 是源里**原样声明**的那个串，不是绝对地址，调用方应当把它当**不透明
+        令牌**原样回传给 `explore()`。不在这里拼 base_url 是因为它可能带 URL 选项
+        （`/list/1,{"method":"POST","body":"..."}`）—— 引擎会先拆选项再拼 base_url，
+        顺序反过来就可能把选项拼坏。
+        """
+        spec = self._spec(url_id)
+        kinds = [
+            {"name": kind.name, "url": kind.url} for kind in spec.explore_kinds() if kind.url
+        ]
+        if not kinds:
+            raise LookupError("这个源没有可浏览的分类")
+        return kinds
+
+    def explore(self, url_id: int, kind_url: str, page: int = 1) -> List[Dict[str, Any]]:
+        """浏览某个分类下的书。
+
+        返回形状和搜索结果一致（每本书带 `sources`），这样详情页那条链不必分两种
+        情况处理 —— 只是这里的 `sources` 恒为一项，因为浏览是单源行为。
+        """
+        spec = self._spec(url_id)
+        books = self._run(
+            url_id,
+            spec,
+            lambda engine: engine.explore(kind_url, page=page),
+            timeout=SEARCH_TIMEOUT,
+        )
+        items: List[Dict[str, Any]] = []
+        for book in books:
+            if not book.name.strip():
+                continue
+            items.append(AggregatedBook(book, url_id).to_dict())
+        return items
+
     def sources_for(
         self,
         book_key: str,

@@ -511,3 +511,149 @@ def test_sources_for_on_a_book_not_on_the_shelf_raises(make_service):
     service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
     with pytest.raises(LookupError):
         service.sources_for("不存在的key")
+
+
+# ------------------------------------------------------------------ 发现页
+
+
+def _explore_source(host, name, kinds="玄幻::/list/1\n都市::/list/2"):
+    source = _source(host, name)
+    source["exploreUrl"] = kinds
+    source["ruleExplore"] = {
+        "bookList": "class.r@tag.li",
+        "name": "class.n@text",
+        "author": "class.a@text",
+        "bookUrl": "tag.a@href",
+    }
+    return source
+
+
+def test_explore_sources_lists_only_sources_with_explore_rules(make_service):
+    """没有发现页规则的源不该出现在这个列表里 —— 点进去什么都没有。"""
+    service = make_service(
+        pages={},
+        sources={
+            1: _explore_source("a.example.com", "有分类的源"),
+            2: _source("b.example.com", "只能搜的源"),
+        },
+    )
+
+    page = service.explore_sources()
+
+    assert [item["name"] for item in page["items"]] == ["有分类的源"]
+    assert page["total"] == 1
+
+
+def test_explore_sources_includes_the_category_names(make_service):
+    service = make_service(
+        pages={}, sources={1: _explore_source("a.example.com", "甲源")}
+    )
+
+    assert service.explore_sources()["items"][0]["kinds"] == ["玄幻", "都市"]
+
+
+def test_explore_sources_filters_and_paginates(make_service):
+    service = make_service(
+        pages={},
+        sources={
+            1: _explore_source("a.example.com", "甲源"),
+            2: _explore_source("b.example.com", "乙源"),
+        },
+    )
+
+    assert service.explore_sources(q="甲")["total"] == 1
+    assert service.explore_sources(limit=1)["items"] and len(
+        service.explore_sources(limit=1)["items"]
+    ) == 1
+    assert service.explore_sources(limit=1, offset=9)["items"] == []
+
+
+def test_explore_kinds_touches_no_network(make_service):
+    """exploreUrl 是源 JSON 里的静态字段。"""
+    service = make_service(pages={}, sources={1: _explore_source("a.example.com", "甲源")})
+
+    kinds = service.explore_kinds(1)
+
+    assert [k["name"] for k in kinds] == ["玄幻", "都市"]
+    #  原样返回源里声明的串，不拼 base_url —— 它可能带 URL 选项，拼的顺序反了
+    #  会把选项弄坏。调用方当不透明令牌回传即可。
+    assert [k["url"] for k in kinds] == ["/list/1", "/list/2"]
+    assert service.fetcher.requests == []
+
+
+def test_explore_accepts_the_token_as_declared(make_service):
+    """分类 URL 原样回传就能用 —— 绝对化由引擎做。"""
+    service = make_service(
+        pages={"https://a.example.com/list/1": _search_html([("剑来", "烽火")])},
+        sources={1: _explore_source("a.example.com", "甲源")},
+    )
+    token = service.explore_kinds(1)[0]["url"]
+
+    assert [item["name"] for item in service.explore(1, token)] == ["剑来"]
+
+
+def test_explore_kinds_on_a_source_without_them_raises(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    with pytest.raises(LookupError, match="没有可浏览的分类"):
+        service.explore_kinds(1)
+
+
+def test_explore_kinds_on_an_unknown_source_raises(make_service):
+    service = make_service(pages={}, sources={1: _explore_source("a.example.com", "甲源")})
+    with pytest.raises(LookupError):
+        service.explore_kinds(999)
+
+
+def test_explore_returns_books_shaped_like_search_results(make_service):
+    """形状和搜索一致，详情页那条链才不必分两种情况处理。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/list/1": _search_html(
+                [("剑来", "烽火戏诸侯"), ("雪中悍刀行", "烽火戏诸侯")]
+            )
+        },
+        sources={1: _explore_source("a.example.com", "甲源")},
+    )
+
+    items = service.explore(1, "/list/1")
+
+    assert [item["name"] for item in items] == ["剑来", "雪中悍刀行"]
+    assert items[0]["book_key"]
+    #  浏览是单源行为，所以 sources 恒为一项
+    assert items[0]["sources"] == [
+        {"url_id": 1, "source_name": "甲源", "book_url": "https://a.example.com/b/0"}
+    ]
+
+
+def test_explore_drops_entries_without_a_name(make_service):
+    service = make_service(
+        pages={"https://a.example.com/list/1": _search_html([("", "无名"), ("剑来", "烽火")])},
+        sources={1: _explore_source("a.example.com", "甲源")},
+    )
+
+    assert [item["name"] for item in service.explore(1, "/list/1")] == ["剑来"]
+
+
+def test_explore_records_the_source_result(make_service):
+    """浏览失败也要记进 fail_count —— 它和搜索共用一个候选池排序。"""
+    service = make_service(pages={}, sources={1: _explore_source("a.example.com", "甲源")})
+
+    with pytest.raises(Exception):
+        service.explore(1, "/list/1")
+
+    pref = storage.list_source_prefs(enabled_only=False, database_url=service.database_url)[0]
+    assert pref.fail_count == 1
+
+
+def test_scan_counts_explore_capable_sources(make_service):
+    service = make_service(
+        pages={},
+        sources={
+            1: _explore_source("a.example.com", "甲源"),
+            2: _source("b.example.com", "乙源"),
+        },
+    )
+    stats = service.registry.scan()
+
+    assert stats["has_explore"] == 1
+    assert stats["enabled"] == 2

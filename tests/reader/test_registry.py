@@ -154,6 +154,7 @@ def test_scan_on_an_empty_archive(registry):
         "complete": 0,
         "needs_js": 0,
         "web_view": 0,
+        "has_explore": 0,
         "enabled": 0,
     }
 

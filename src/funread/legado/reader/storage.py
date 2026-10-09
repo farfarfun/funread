@@ -105,6 +105,9 @@ class ReaderSourcePref(ReaderBase):
     weight: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     needs_js: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: 这个源有没有发现页规则（`exploreUrl` + 列表规则）。扫描时算好存下来 ——
+    #: 不存的话「列出能浏览分类的源」就要现场读 5,606 个 JSON 文件。
+    has_explore: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_ok_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
@@ -264,6 +267,32 @@ _USER_SCOPED_TABLES = {
     "reader_progress": "book_key",
 }
 
+#: 后来补的普通列（不进主键），`ALTER TABLE ADD COLUMN` 就够。
+#: 格式：表名 → [(列名, DDL 片段)]
+_ADDED_COLUMNS = {
+    "reader_source_prefs": [("has_explore", "BOOLEAN NOT NULL DEFAULT 0")],
+}
+
+
+def _migrate_added_columns(engine) -> None:
+    """给已有表补上后来加的普通列。
+
+    和 `_migrate_user_scope` 分开：那个要重建表（主键变了），这个只是加列。
+    加列是幂等的 —— 先看 `inspect` 里有没有，有就跳过。
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    for table, columns in _ADDED_COLUMNS.items():
+        if table not in existing_tables:
+            continue
+        present = {column["name"] for column in inspector.get_columns(table)}
+        for name, ddl in columns:
+            if name in present:
+                continue
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+            logger.info(f"{table} 已补上 {name} 列")
+
 
 def _migrate_user_scope(engine) -> None:
     """给 M2 时建的 `reader_shelf` / `reader_progress` 补上 `user_id` 主键列。
@@ -327,6 +356,7 @@ def init_reader_db(database_url: Optional[str] = None) -> None:
     #  先迁移再 create_all：create_all 只会跳过已存在的表，不会去改它的形状，
     #  所以旧表必须在这之前重建好。
     _migrate_user_scope(engine)
+    _migrate_added_columns(engine)
     ReaderBase.metadata.create_all(engine)
     _INITIALIZED_DATABASES.add(key)
 
@@ -517,6 +547,7 @@ def list_source_prefs(
     source_type: str = "book",
     enabled_only: bool = True,
     limit: Optional[int] = None,
+    explore_only: bool = False,
     database_url: Optional[str] = None,
 ) -> List[ReaderSourcePref]:
     """按「真跑通过的优先、失败少优先、权重高优先」列出源。
@@ -531,6 +562,8 @@ def list_source_prefs(
         stmt = select(ReaderSourcePref).where(ReaderSourcePref.source_type == source_type)
         if enabled_only:
             stmt = stmt.where(ReaderSourcePref.enabled.is_(True))
+        if explore_only:
+            stmt = stmt.where(ReaderSourcePref.has_explore.is_(True))
         stmt = stmt.order_by(
             ReaderSourcePref.last_ok_at.is_(None).asc(),
             ReaderSourcePref.fail_count.asc(),

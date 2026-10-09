@@ -110,7 +110,14 @@ class SourceRegistry:
         **不碰** `fail_count`/`last_ok_at`/`last_error` —— 那些是实跑积累下来的，
         重扫一次不该把它们抹掉。
         """
-        stats = {"scanned": 0, "complete": 0, "needs_js": 0, "web_view": 0, "enabled": 0}
+        stats = {
+            "scanned": 0,
+            "complete": 0,
+            "needs_js": 0,
+            "web_view": 0,
+            "has_explore": 0,
+            "enabled": 0,
+        }
         batch: List[Dict[str, Any]] = []
 
         for url_id, data in self.iter_archive():
@@ -126,6 +133,15 @@ class SourceRegistry:
             #  但工作方式是把页面塞进 WebView —— 纯 Python 跑不了，不能进候选池。
             #  书源没有这个形态，`is_web_view` 对它恒为 False。
             web_view = spec.is_web_view
+            #  发现页要有入口 URL，还要有能解析列表的规则（`ruleExplore.bookList`
+            #  缺省时引擎会回落到 `ruleSearch.bookList`，所以两者有一个就算）
+            has_explore = bool(
+                spec.explore_url.strip()
+                and (
+                    spec.has_rule("ruleExplore", "bookList")
+                    or spec.has_rule("ruleSearch", "bookList")
+                )
+            )
             enabled = bool(is_complete and not needs_js and not web_view)
             if is_complete:
                 stats["complete"] += 1
@@ -133,6 +149,8 @@ class SourceRegistry:
                 stats["needs_js"] += 1
             if web_view:
                 stats["web_view"] += 1
+            if has_explore and enabled:
+                stats["has_explore"] += 1
             if enabled:
                 stats["enabled"] += 1
             batch.append(
@@ -145,6 +163,7 @@ class SourceRegistry:
                     "weight": 1 if data.get("status") == SOURCE_STATUS_AVAILABLE else 0,
                     "is_complete": is_complete,
                     "needs_js": needs_js,
+                    "has_explore": has_explore,
                 }
             )
             if len(batch) >= SCAN_BATCH_SIZE:
@@ -158,11 +177,16 @@ class SourceRegistry:
 
     # ------------------------------------------------------------------ 选源
 
-    def prefs(self, limit: Optional[int] = None) -> List[ReaderSourcePref]:
+    def prefs(
+        self,
+        limit: Optional[int] = None,
+        explore_only: bool = False,
+    ) -> List[ReaderSourcePref]:
         return list_source_prefs(
             source_type=self.source_type,
             enabled_only=True,
             limit=limit,
+            explore_only=explore_only,
             database_url=self.database_url,
         )
 
