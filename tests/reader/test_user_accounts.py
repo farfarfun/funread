@@ -155,9 +155,7 @@ def test_disabled_user_cannot_authenticate(db):
 
 def test_first_user_claims_data_left_by_the_accountless_era(db):
     upsert_shelf_book({"name": "剑来", "author": "烽火戏诸侯"}, database_url=db)
-    save_progress(
-        storage.compute_book_key("剑来", "烽火戏诸侯"), chapter_index=7, database_url=db
-    )
+    save_progress(storage.compute_book_key("剑来", "烽火戏诸侯"), chapter_index=7, database_url=db)
     assert len(list_shelf(LOCAL_USER_ID, database_url=db)) == 1
 
     alice = create_user("alice", "password123", database_url=db)

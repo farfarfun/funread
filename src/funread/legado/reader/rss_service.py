@@ -119,9 +119,7 @@ class RssService:
         """
         spec = self._spec(url_id)
         if spec.is_web_view and not self.allow_web_view:
-            raise WebViewNotSupportedError(
-                "该订阅源需要浏览器环境，暂不支持", source_url=spec.url
-            )
+            raise WebViewNotSupportedError("该订阅源需要浏览器环境，暂不支持", source_url=spec.url)
         if not spec.is_complete:
             raise RuleSyntaxError(
                 f"该订阅源规则不完整，缺少：{'、'.join(spec.missing_core_fields())}"
@@ -162,9 +160,7 @@ class RssService:
             user_id=user_id,
             database_url=self.database_url,
         )
-        storage.record_subscription_fetch(
-            sub_id, user_id=user_id, database_url=self.database_url
-        )
+        storage.record_subscription_fetch(sub_id, user_id=user_id, database_url=self.database_url)
         result = self.subscription(sub_id, user_id)
         result["preview"] = len(page.items)
         return result
@@ -178,15 +174,11 @@ class RssService:
         body = page.text or ""
         data = body.encode("utf-8", "ignore") if isinstance(body, str) else body
         if len(data) > MAX_FEED_BYTES:
-            raise RuleSyntaxError(
-                f"feed 内容超过 {MAX_FEED_BYTES // 1024 // 1024}MB，拒绝解析"
-            )
+            raise RuleSyntaxError(f"feed 内容超过 {MAX_FEED_BYTES // 1024 // 1024}MB，拒绝解析")
         return data
 
     def unsubscribe(self, sub_id: str, user_id: int) -> bool:
-        return storage.remove_subscription(
-            sub_id, user_id=user_id, database_url=self.database_url
-        )
+        return storage.remove_subscription(sub_id, user_id=user_id, database_url=self.database_url)
 
     def subscription(self, sub_id: str, user_id: int) -> Dict[str, Any]:
         row = storage.get_subscription(sub_id, user_id=user_id, database_url=self.database_url)
@@ -197,9 +189,7 @@ class RssService:
     def subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
         return [
             self._to_dict(row)
-            for row in storage.list_subscriptions(
-                user_id=user_id, database_url=self.database_url
-            )
+            for row in storage.list_subscriptions(user_id=user_id, database_url=self.database_url)
         ]
 
     def _to_dict(self, row) -> Dict[str, Any]:
@@ -211,9 +201,7 @@ class RssService:
             "title": row.title or "",
             "icon": row.icon or "",
             "group": row.group or "",
-            "last_fetched_at": (
-                row.last_fetched_at.isoformat() if row.last_fetched_at else ""
-            ),
+            "last_fetched_at": (row.last_fetched_at.isoformat() if row.last_fetched_at else ""),
             "last_error": row.last_error or "",
             "read_count": storage.count_read(
                 row.sub_id, user_id=row.user_id, database_url=self.database_url
@@ -262,9 +250,7 @@ class RssService:
                 sub_id, user_id=user_id, error=str(exc), database_url=self.database_url
             )
             raise
-        storage.record_subscription_fetch(
-            sub_id, user_id=user_id, database_url=self.database_url
-        )
+        storage.record_subscription_fetch(sub_id, user_id=user_id, database_url=self.database_url)
 
         items = result.items[:limit]
         keys = [storage.compute_article_key(a.link) for a in items if a.link]
@@ -341,9 +327,7 @@ class RssService:
             spec = self._spec(int(row.url_id))
             try:
                 with self.fetcher_factory(timeout=FETCH_TIMEOUT) as fetcher:
-                    engine = RssSourceEngine(
-                        spec, fetcher, allow_web_view=self.allow_web_view
-                    )
+                    engine = RssSourceEngine(spec, fetcher, allow_web_view=self.allow_web_view)
                     article = engine.article(link, variables=variables, title=title)
             except (JsNotSupportedError, UnsupportedFeatureError):
                 #  结构性不支持：把源停用，下次选它结果一样

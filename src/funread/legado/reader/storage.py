@@ -440,9 +440,7 @@ def claim_local_data(user_id: int, database_url: Optional[str] = None) -> Dict[s
     with session_factory() as session:
         for model in (ReaderShelfBook, ReaderProgress):
             result = session.execute(
-                update(model)
-                .where(model.user_id == LOCAL_USER_ID)
-                .values(user_id=int(user_id))
+                update(model).where(model.user_id == LOCAL_USER_ID).values(user_id=int(user_id))
             )
             moved[model.__tablename__] = int(result.rowcount or 0)
         session.commit()

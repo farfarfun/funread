@@ -142,9 +142,7 @@ def match_chapter(
                     total=new_total,
                 )
 
-    return ChapterMatch(
-        index=guess, name=new_names[guess], method=MATCH_POSITION, total=new_total
-    )
+    return ChapterMatch(index=guess, name=new_names[guess], method=MATCH_POSITION, total=new_total)
 
 
 def match_chapter_in(

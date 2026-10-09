@@ -112,9 +112,7 @@ def _content_of(entry) -> str:
         if node is None:
             continue
         #  Atom 的 content 可能是 XHTML 子树而不是文字
-        inner = "".join(
-            part if isinstance(part, str) else "" for part in (node.text or "",)
-        )
+        inner = "".join(part if isinstance(part, str) else "" for part in (node.text or "",))
         if inner.strip():
             return inner
         if len(node):

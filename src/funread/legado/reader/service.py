@@ -342,9 +342,7 @@ class ReaderService:
         顺序反过来就可能把选项拼坏。
         """
         spec = self._spec(url_id)
-        kinds = [
-            {"name": kind.name, "url": kind.url} for kind in spec.explore_kinds() if kind.url
-        ]
+        kinds = [{"name": kind.name, "url": kind.url} for kind in spec.explore_kinds() if kind.url]
         if not kinds:
             raise LookupError("这个源没有可浏览的分类")
         return kinds
@@ -569,18 +567,14 @@ class ReaderService:
         payload: Dict[str, Any],
         user_id: int = storage.LOCAL_USER_ID,
     ) -> str:
-        return storage.upsert_shelf_book(
-            payload, user_id=user_id, database_url=self.database_url
-        )
+        return storage.upsert_shelf_book(payload, user_id=user_id, database_url=self.database_url)
 
     def remove_from_shelf(
         self,
         book_key: str,
         user_id: int = storage.LOCAL_USER_ID,
     ) -> bool:
-        return storage.remove_shelf_book(
-            book_key, user_id=user_id, database_url=self.database_url
-        )
+        return storage.remove_shelf_book(book_key, user_id=user_id, database_url=self.database_url)
 
     def save_progress(
         self,

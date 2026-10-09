@@ -167,16 +167,12 @@ def test_an_rss_source_is_not_measured_against_the_book_core_fields():
     fields = {"ruleArticles": "class.item", "ruleTitle": "h2@text"}
     assert rss(**fields).is_complete is True
     #  同一份数据按书源解析就是不完整的 —— 对比着看才说明问题
-    as_book = load_source(
-        {"sourceUrl": "https://feed.example.com", **fields}, source_type="book"
-    )
+    as_book = load_source({"sourceUrl": "https://feed.example.com", **fields}, source_type="book")
     assert as_book.is_complete is False
 
 
 def test_missing_source_url_is_an_incomplete_source():
-    spec = load_source(
-        {"ruleArticles": "class.item", "ruleTitle": "h2@text"}, source_type="rss"
-    )
+    spec = load_source({"ruleArticles": "class.item", "ruleTitle": "h2@text"}, source_type="rss")
     assert "sourceUrl" in spec.missing_core_fields()
 
 
@@ -225,9 +221,7 @@ def test_a_blank_single_url_is_not_a_web_view_source():
 
 
 def test_sort_url_parses_into_categories():
-    spec = rss(
-        sortUrl="头条::https://feed.example.com/top\n科技::https://feed.example.com/tech"
-    )
+    spec = rss(sortUrl="头条::https://feed.example.com/top\n科技::https://feed.example.com/tech")
     assert [(k.name, k.url) for k in spec.rss_categories] == [
         ("头条", "https://feed.example.com/top"),
         ("科技", "https://feed.example.com/tech"),

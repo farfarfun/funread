@@ -264,9 +264,7 @@ class RssSourceEngine:
         rules = self.source.group_rules("ruleRss")
         content_rule = rules.get("content", "") or rules.get("description", "")
         if not content_rule.strip():
-            raise RuleEmptyError(
-                "该订阅源没有 ruleContent，只能看列表", source_url=self.source.url
-            )
+            raise RuleEmptyError("该订阅源没有 ruleContent，只能看列表", source_url=self.source.url)
 
         page = self._fetch(link, base=self.source.base_url, variables=variables or {})
         scope = self._evaluator(

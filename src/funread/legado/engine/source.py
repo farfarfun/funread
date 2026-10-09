@@ -425,9 +425,7 @@ class SourceSpec:
     def rss_categories(self) -> List[ExploreKind]:
         """`sortUrl` 的多分类入口。没有 `sortUrl` 时退化成单分类 = 源地址本身。"""
         kinds = [
-            ExploreKind(name=name, url=url)
-            for name, url in parse_named_urls(self.sort_url)
-            if url
+            ExploreKind(name=name, url=url) for name, url in parse_named_urls(self.sort_url) if url
         ]
         if kinds:
             return kinds
