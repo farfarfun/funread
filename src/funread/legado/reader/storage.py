@@ -1,21 +1,63 @@
-"""阅读端的持久化：源偏好、书架、阅读进度、章节缓存。
+"""阅读端的持久化：账号、源偏好、书架、阅读进度、章节缓存。
 
 和 `manage/source/storage.py` 同一套路子（SQLAlchemy declarative + `create_all`
 + 手写迁移，不引 Alembic），但表是独立的一组，engine / session 工厂复用那边的缓存
 —— 同一个库开两个连接池没有意义。
+
+## 数据按人隔离
+
+书架、进度（以及订阅源那两张表）都带 `user_id`，查询一律进 SQL 的 WHERE 而不是
+在应用层过滤 —— 漏一处就是跨用户数据泄露。章节正文缓存 `reader_chapter_cache`
+**不带** `user_id`：它是正文缓存而不是个人数据，按人隔离只会让同一章正文存 N 份。
+
+`user_id = 0`（`LOCAL_USER_ID`）是「还没有任何账号」时的隐式单人身份，保证新克隆
+与 CI 不配账号也能直接用。第一个账号注册成功时会把 user 0 的数据认领过去
+（`claim_local_data`），之后 user 0 不再可达。
 """
 
 import hashlib
+import hmac
+import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from farlog import getLogger
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, delete, select
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    delete,
+    func,
+    inspect,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from ..manage.source.storage import _get_engine, _get_session_factory, utcnow
 
 logger = getLogger("funread")
+
+#: 还没有任何注册账号时使用的隐式身份。见模块 docstring。
+LOCAL_USER_ID = 0
+
+#: 用户名规则：字母数字加下划线短横点，3-32 位。限死是为了让它能安全地出现在
+#: 日志、URL 和错误文案里，不必再逐处转义。
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$")
+
+MIN_PASSWORD_LENGTH = 8
+
+#: scrypt 参数。n=2**14 在本机约 60ms —— 对登录够快，对离线爆破够慢。
+#: 存进哈希串里，所以以后调大不会让旧口令失效。
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_SALT_BYTES = 16
+_SCRYPT_KEY_BYTES = 32
 
 
 class ReaderBase(DeclarativeBase):
@@ -24,6 +66,25 @@ class ReaderBase(DeclarativeBase):
     和采集侧的 `Base` 分开：`init_reader_db()` 不该顺手把采集侧的表也建出来，
     反过来也一样。
     """
+
+
+class ReaderUser(ReaderBase):
+    """一个阅读端账号。
+
+    和 B 端 `/admin` 的单口令完全分开 —— 管理端不该和读者账号共用凭据。
+    口令只存 scrypt 哈希，明文不落库也不进日志。
+    """
+
+    __tablename__ = "reader_user"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class ReaderSourcePref(ReaderBase):
@@ -56,14 +117,18 @@ class ReaderSourcePref(ReaderBase):
 class ReaderShelfBook(ReaderBase):
     """书架上的一本书。
 
-    主键是 `book_key`（书名+作者的 md5）而不是 (源, bookUrl)：同一本书在不同源下
-    的 URL 完全不同，换源时如果主键跟着源走，书架上就会冒出两条同名记录、进度也
-    各记各的。源相关的字段（`source_type`/`url_id`/`book_url`）是「当前读的是哪个源」，
-    换源时原地改写。
+    主键是 `(user_id, book_key)`，`book_key` 是书名+作者的 md5 而不是 (源, bookUrl)：
+    同一本书在不同源下的 URL 完全不同，换源时如果主键跟着源走，书架上就会冒出两条
+    同名记录、进度也各记各的。源相关的字段（`source_type`/`url_id`/`book_url`）是
+    「当前读的是哪个源」，换源时原地改写。
+
+    `user_id` 进主键而不是只做个索引列：两个人各自把同一本书加进书架是完全正常的，
+    `book_key` 单独做主键会让第二个人加不进去。
     """
 
     __tablename__ = "reader_shelf"
 
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=LOCAL_USER_ID)
     book_key: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     author: Mapped[str] = mapped_column(String(255), nullable=False, default="")
@@ -81,7 +146,7 @@ class ReaderShelfBook(ReaderBase):
 
 
 class ReaderProgress(ReaderBase):
-    """阅读进度。一本书一条，跟着 `book_key` 走，换源不丢。
+    """阅读进度。一人一本书一条，跟着 `book_key` 走，换源不丢。
 
     `char_offset` 存的是正文里的字符偏移而不是滚动像素 —— 换了字号/字体/设备之后
     像素值毫无意义，字符偏移还能换算回大致位置。
@@ -89,6 +154,7 @@ class ReaderProgress(ReaderBase):
 
     __tablename__ = "reader_progress"
 
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=LOCAL_USER_ID)
     book_key: Mapped[str] = mapped_column(String(32), primary_key=True)
     chapter_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chapter_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
@@ -100,7 +166,12 @@ class ReaderProgress(ReaderBase):
 
 
 class ReaderChapterCache(ReaderBase):
-    """已抓取的章节正文。既是缓存也是离线下载的落点。"""
+    """已抓取的章节正文。既是缓存也是离线下载的落点。
+
+    **故意不带 `user_id`**：这是正文缓存，不是个人数据。按人隔离只会让同一章正文
+    存 N 份，而正文本身没有任何隐私含义 —— 它就是公网上那一页。代价是下架时不能
+    无条件清缓存，见 `remove_shelf_book`。
+    """
 
     __tablename__ = "reader_chapter_cache"
 
@@ -127,13 +198,219 @@ def compute_book_key(name: str, author: str = "") -> str:
     return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
 
+#: 带 `user_id` 的表，以及它们在补上这一列之前的主键。迁移要按这张表重建。
+_USER_SCOPED_TABLES = {
+    "reader_shelf": "book_key",
+    "reader_progress": "book_key",
+}
+
+
+def _migrate_user_scope(engine) -> None:
+    """给 M2 时建的 `reader_shelf` / `reader_progress` 补上 `user_id` 主键列。
+
+    不能用 `ALTER TABLE ADD COLUMN` 了事 —— `user_id` 要进**主键**，而 SQLite 改不了
+    已有表的主键。所以走标准的重建三步：旧表改名 → 按新形状建表 → 带着
+    `LOCAL_USER_ID` 把数据搬过去。搬完核对行数，不一致就抛，宁可迁移失败也不要
+    悄悄丢几本书。
+
+    存量行归到 `user_id = 0`，第一个注册的账号会通过 `claim_local_data` 认领。
+    """
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    stale = {
+        name
+        for name in _USER_SCOPED_TABLES
+        if name in existing
+        and "user_id" not in {column["name"] for column in inspector.get_columns(name)}
+    }
+    if not stale:
+        return
+
+    for name in sorted(stale):
+        legacy = f"{name}__pre_user"
+        with engine.begin() as connection:
+            before = connection.execute(text(f"SELECT COUNT(*) FROM {name}")).scalar_one()
+            #  上一次迁移中途挂掉留下的残渣，先清掉再重来
+            connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
+            connection.execute(text(f"ALTER TABLE {name} RENAME TO {legacy}"))
+
+        ReaderBase.metadata.tables[name].create(engine)
+
+        with engine.begin() as connection:
+            columns = [
+                column["name"]
+                for column in inspect(engine).get_columns(legacy)
+                if column["name"] != "user_id"
+            ]
+            joined = ", ".join(columns)
+            connection.execute(
+                text(
+                    f"INSERT INTO {name} (user_id, {joined}) "
+                    f"SELECT {LOCAL_USER_ID}, {joined} FROM {legacy}"
+                )
+            )
+            after = connection.execute(text(f"SELECT COUNT(*) FROM {name}")).scalar_one()
+            if after != before:
+                raise RuntimeError(
+                    f"{name} 迁移后行数不符：迁移前 {before}，迁移后 {after}。"
+                    f"旧数据仍在 {legacy}，没有删除。"
+                )
+            connection.execute(text(f"DROP TABLE {legacy}"))
+        logger.info(f"{name} 已补上 user_id 列，{before} 行归到 user {LOCAL_USER_ID}")
+
+
 def init_reader_db(database_url: Optional[str] = None) -> None:
     engine = _get_engine(database_url)
     key = str(engine.url)
     if key in _INITIALIZED_DATABASES:
         return
+    #  先迁移再 create_all：create_all 只会跳过已存在的表，不会去改它的形状，
+    #  所以旧表必须在这之前重建好。
+    _migrate_user_scope(engine)
     ReaderBase.metadata.create_all(engine)
     _INITIALIZED_DATABASES.add(key)
+
+
+# ------------------------------------------------------------------ 口令哈希
+
+
+def hash_password(password: str) -> str:
+    """`scrypt$n$r$p$salt_hex$key_hex`。
+
+    用 stdlib 的 `hashlib.scrypt`，不引 passlib/bcrypt —— funread 的依赖面要维持
+    现状，而 scrypt 本身就是为抗硬件爆破设计的。参数编进字符串，以后调大不会让
+    已有口令失效。
+    """
+    if not password:
+        raise ValueError("password is required")
+    salt = os.urandom(_SCRYPT_SALT_BYTES)
+    key = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_KEY_BYTES,
+        maxmem=64 * 1024 * 1024,
+    )
+    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${key.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """永不抛：哈希串格式坏了就是验证失败，不是 500。"""
+    try:
+        scheme, n, r, p, salt_hex, key_hex = (stored or "").split("$")
+        if scheme != "scrypt":
+            return False
+        candidate = hashlib.scrypt(
+            (password or "").encode("utf-8"),
+            salt=bytes.fromhex(salt_hex),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(bytes.fromhex(key_hex)),
+            maxmem=64 * 1024 * 1024,
+        )
+    except (ValueError, TypeError, MemoryError):
+        return False
+    #  compare_digest，不是 ==：普通比较会按时间泄露哈希
+    return hmac.compare_digest(candidate.hex(), key_hex)
+
+
+# ------------------------------------------------------------------ 账号
+
+
+def count_users(database_url: Optional[str] = None) -> int:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        return int(session.execute(select(func.count()).select_from(ReaderUser)).scalar_one())
+
+
+def get_user_by_name(username: str, database_url: Optional[str] = None) -> Optional[ReaderUser]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = select(ReaderUser).where(ReaderUser.username == (username or "").strip())
+        return session.execute(stmt).scalars().first()
+
+
+def get_user(user_id: int, database_url: Optional[str] = None) -> Optional[ReaderUser]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        return session.get(ReaderUser, int(user_id))
+
+
+def claim_local_data(user_id: int, database_url: Optional[str] = None) -> Dict[str, int]:
+    """把 `user_id = 0` 的存量数据认领给某个账号。
+
+    只在第一个账号注册时调用：那之前的书架与进度是「还没有账号时」攒下来的，
+    理应归第一个人。第二个账号注册时已经没有 user 0 的行了，所以这个函数返回全零。
+    """
+    moved: Dict[str, int] = {}
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        for model in (ReaderShelfBook, ReaderProgress):
+            result = session.execute(
+                update(model)
+                .where(model.user_id == LOCAL_USER_ID)
+                .values(user_id=int(user_id))
+            )
+            moved[model.__tablename__] = int(result.rowcount or 0)
+        session.commit()
+    return moved
+
+
+def create_user(
+    username: str,
+    password: str,
+    database_url: Optional[str] = None,
+) -> ReaderUser:
+    """建账号。用户名已存在抛 `ValueError`，调用方把它翻成 409。
+
+    第一个账号会顺带认领 user 0 的存量数据 —— 它本来就是同一个人在没有账号时读的。
+    """
+    username = (username or "").strip()
+    if not USERNAME_PATTERN.match(username):
+        raise ValueError("用户名需为 3-32 位字母、数字、下划线、短横线或点，且以字母数字开头")
+    if len(password or "") < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"口令至少 {MIN_PASSWORD_LENGTH} 位")
+
+    session_factory = get_session_factory(database_url)
+    is_first = count_users(database_url) == 0
+    with session_factory() as session:
+        if session.execute(
+            select(ReaderUser.user_id).where(ReaderUser.username == username)
+        ).first():
+            raise ValueError("用户名已被占用")
+        row = ReaderUser(username=username, password_hash=hash_password(password))
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        created = row
+
+    if is_first:
+        moved = claim_local_data(created.user_id, database_url=database_url)
+        if any(moved.values()):
+            logger.info(f"首个账号 {username} 认领了无主数据：{moved}")
+    return created
+
+
+def authenticate(
+    username: str,
+    password: str,
+    database_url: Optional[str] = None,
+) -> Optional[ReaderUser]:
+    """校验口令。用户不存在与口令不对返回同一个 `None` —— 不泄露用户名是否存在。"""
+    user = get_user_by_name(username, database_url=database_url)
+    if user is None:
+        #  走一遍同等开销的哈希，避免「用户不存在」比「口令错」快得多，
+        #  那本身就是一个可枚举用户名的信道
+        verify_password(password or "", hash_password("timing-equaliser"))
+        return None
+    if user.disabled:
+        return None
+    if not verify_password(password or "", user.password_hash):
+        return None
+    return user
 
 
 def get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
@@ -240,37 +517,53 @@ def record_source_result(
 # ------------------------------------------------------------------ 书架
 
 
-def list_shelf(database_url: Optional[str] = None) -> List[ReaderShelfBook]:
-    """书架列表，最近读过的排前面。"""
+def list_shelf(
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> List[ReaderShelfBook]:
+    """某个人的书架，最近读过的排前面。"""
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        stmt = select(ReaderShelfBook).order_by(ReaderShelfBook.updated_at.desc())
+        stmt = (
+            select(ReaderShelfBook)
+            .where(ReaderShelfBook.user_id == int(user_id))
+            .order_by(ReaderShelfBook.updated_at.desc())
+        )
         return list(session.execute(stmt).scalars().all())
 
 
-def get_shelf_book(book_key: str, database_url: Optional[str] = None) -> Optional[ReaderShelfBook]:
+def get_shelf_book(
+    book_key: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> Optional[ReaderShelfBook]:
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        return session.get(ReaderShelfBook, book_key)
+        return session.get(ReaderShelfBook, (int(user_id), book_key))
 
 
-def upsert_shelf_book(payload: Dict[str, Any], database_url: Optional[str] = None) -> str:
+def upsert_shelf_book(
+    payload: Dict[str, Any],
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> str:
     """加书入架 / 更新书架条目，返回 `book_key`。
 
     调用方可以不给 `book_key`，由书名+作者算出来 —— 前端拿到的搜索结果里本来就
-    只有这两样。
+    只有这两样。`user_id` 由调用方给，**不从 payload 里取** —— payload 来自 HTTP
+    请求体，让它能指定 user_id 等于让任何人往别人书架里塞书。
     """
     book_key = payload.get("book_key") or compute_book_key(
         str(payload.get("name") or ""), str(payload.get("author") or "")
     )
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        row = session.get(ReaderShelfBook, book_key)
+        row = session.get(ReaderShelfBook, (int(user_id), book_key))
         if row is None:
-            row = ReaderShelfBook(book_key=book_key)
+            row = ReaderShelfBook(user_id=int(user_id), book_key=book_key)
             session.add(row)
         for field, value in payload.items():
-            if field == "book_key":
+            if field in ("book_key", "user_id"):
                 continue
             if hasattr(row, field) and value is not None:
                 setattr(row, field, value)
@@ -279,16 +572,38 @@ def upsert_shelf_book(payload: Dict[str, Any], database_url: Optional[str] = Non
     return book_key
 
 
-def remove_shelf_book(book_key: str, database_url: Optional[str] = None) -> bool:
-    """下架。连带清掉进度和章节缓存 —— 留着就是永远不会被读到的垃圾。"""
+def remove_shelf_book(
+    book_key: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> bool:
+    """下架。连带清掉**这个人的**进度。
+
+    章节缓存只在没有别人也把这本书放在架上时才清 —— 缓存是全局共享的，无条件清掉
+    会顺手废掉另一个人已经下载好的章节。
+    """
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        row = session.get(ReaderShelfBook, book_key)
+        row = session.get(ReaderShelfBook, (int(user_id), book_key))
         if row is None:
             return False
         session.delete(row)
-        session.execute(delete(ReaderProgress).where(ReaderProgress.book_key == book_key))
-        session.execute(delete(ReaderChapterCache).where(ReaderChapterCache.book_key == book_key))
+        session.execute(
+            delete(ReaderProgress).where(
+                ReaderProgress.user_id == int(user_id),
+                ReaderProgress.book_key == book_key,
+            )
+        )
+        session.flush()
+        others = session.execute(
+            select(func.count())
+            .select_from(ReaderShelfBook)
+            .where(ReaderShelfBook.book_key == book_key)
+        ).scalar_one()
+        if not others:
+            session.execute(
+                delete(ReaderChapterCache).where(ReaderChapterCache.book_key == book_key)
+            )
         session.commit()
         return True
 
@@ -296,10 +611,14 @@ def remove_shelf_book(book_key: str, database_url: Optional[str] = None) -> bool
 # ------------------------------------------------------------------ 进度
 
 
-def get_progress(book_key: str, database_url: Optional[str] = None) -> Optional[ReaderProgress]:
+def get_progress(
+    book_key: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> Optional[ReaderProgress]:
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        return session.get(ReaderProgress, book_key)
+        return session.get(ReaderProgress, (int(user_id), book_key))
 
 
 def save_progress(
@@ -308,13 +627,14 @@ def save_progress(
     chapter_url: str = "",
     chapter_name: str = "",
     char_offset: int = 0,
+    user_id: int = LOCAL_USER_ID,
     database_url: Optional[str] = None,
 ) -> None:
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        row = session.get(ReaderProgress, book_key)
+        row = session.get(ReaderProgress, (int(user_id), book_key))
         if row is None:
-            row = ReaderProgress(book_key=book_key)
+            row = ReaderProgress(user_id=int(user_id), book_key=book_key)
             session.add(row)
         row.chapter_index = int(chapter_index)
         row.chapter_url = chapter_url or ""
@@ -322,7 +642,7 @@ def save_progress(
         row.char_offset = max(0, int(char_offset))
         row.updated_at = utcnow()
         #  书架上的 updated_at 跟着动，书架排序才会把在读的书顶上去
-        book = session.get(ReaderShelfBook, book_key)
+        book = session.get(ReaderShelfBook, (int(user_id), book_key))
         if book is not None:
             book.updated_at = row.updated_at
         session.commit()
@@ -390,17 +710,28 @@ def clear_chapter_cache(book_key: str, database_url: Optional[str] = None) -> in
 
 
 __all__ = [
+    "LOCAL_USER_ID",
+    "MIN_PASSWORD_LENGTH",
+    "USERNAME_PATTERN",
     "ReaderBase",
     "ReaderChapterCache",
     "ReaderProgress",
     "ReaderShelfBook",
     "ReaderSourcePref",
+    "ReaderUser",
+    "authenticate",
+    "claim_local_data",
     "clear_chapter_cache",
     "compute_book_key",
+    "count_users",
+    "create_user",
     "get_cached_chapter",
     "get_progress",
     "get_session_factory",
     "get_shelf_book",
+    "get_user",
+    "get_user_by_name",
+    "hash_password",
     "init_reader_db",
     "list_cached_chapter_indexes",
     "list_shelf",
@@ -411,4 +742,5 @@ __all__ = [
     "save_progress",
     "upsert_shelf_book",
     "upsert_source_prefs",
+    "verify_password",
 ]

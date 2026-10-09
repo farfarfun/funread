@@ -204,13 +204,17 @@ class ReaderService:
         results.sort(key=lambda item: len(item.sources), reverse=True)
         return [item.to_dict() for item in results]
 
-    def sources_for(self, book_key: str) -> List[Dict[str, Any]]:
+    def sources_for(
+        self,
+        book_key: str,
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> List[Dict[str, Any]]:
         """换源列表：这本书还能在哪些源下读。
 
         书架上只记了「当前在读的源」，别的来源不会落库 —— 真实的换源列表要靠
         重新搜一次得到，所以这里按书名反查。
         """
-        book = storage.get_shelf_book(book_key, database_url=self.database_url)
+        book = storage.get_shelf_book(book_key, user_id=user_id, database_url=self.database_url)
         if book is None:
             return []
         for item in self.search(book.name):
@@ -302,11 +306,13 @@ class ReaderService:
 
     # ------------------------------------------------------------------ 书架
 
-    def shelf(self) -> List[Dict[str, Any]]:
-        """书架列表，带上每本书的阅读进度 —— 前端要在封面上画进度条。"""
+    def shelf(self, user_id: int = storage.LOCAL_USER_ID) -> List[Dict[str, Any]]:
+        """某个人的书架，带上每本书的阅读进度 —— 前端要在封面上画进度条。"""
         items = []
-        for book in storage.list_shelf(database_url=self.database_url):
-            progress = storage.get_progress(book.book_key, database_url=self.database_url)
+        for book in storage.list_shelf(user_id=user_id, database_url=self.database_url):
+            progress = storage.get_progress(
+                book.book_key, user_id=user_id, database_url=self.database_url
+            )
             items.append(
                 {
                     "book_key": book.book_key,
@@ -332,11 +338,23 @@ class ReaderService:
             )
         return items
 
-    def add_to_shelf(self, payload: Dict[str, Any]) -> str:
-        return storage.upsert_shelf_book(payload, database_url=self.database_url)
+    def add_to_shelf(
+        self,
+        payload: Dict[str, Any],
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> str:
+        return storage.upsert_shelf_book(
+            payload, user_id=user_id, database_url=self.database_url
+        )
 
-    def remove_from_shelf(self, book_key: str) -> bool:
-        return storage.remove_shelf_book(book_key, database_url=self.database_url)
+    def remove_from_shelf(
+        self,
+        book_key: str,
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> bool:
+        return storage.remove_shelf_book(
+            book_key, user_id=user_id, database_url=self.database_url
+        )
 
     def save_progress(
         self,
@@ -345,6 +363,7 @@ class ReaderService:
         chapter_url: str = "",
         chapter_name: str = "",
         char_offset: int = 0,
+        user_id: int = storage.LOCAL_USER_ID,
     ) -> None:
         storage.save_progress(
             book_key=book_key,
@@ -352,13 +371,25 @@ class ReaderService:
             chapter_url=chapter_url,
             chapter_name=chapter_name,
             char_offset=char_offset,
+            user_id=user_id,
             database_url=self.database_url,
         )
 
-    def switch_source(self, book_key: str, url_id: int, book_url: str) -> None:
-        """换源。缓存必须清掉 —— 不同源的章节切分方式不同，序号对不上。"""
+    def switch_source(
+        self,
+        book_key: str,
+        url_id: int,
+        book_url: str,
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> None:
+        """换源。缓存必须清掉 —— 不同源的章节切分方式不同，序号对不上。
+
+        缓存是全局共享的，所以这里清掉的是所有人的 —— 但换源本身就意味着原来那套
+        序号不再可信，留着比清掉更糟。
+        """
         storage.upsert_shelf_book(
             {"book_key": book_key, "url_id": url_id, "book_url": book_url, "toc_url": ""},
+            user_id=user_id,
             database_url=self.database_url,
         )
         storage.clear_chapter_cache(book_key, database_url=self.database_url)
