@@ -5,6 +5,7 @@
 sqlalchemy / funread.legado.manage，`engine/` 不行。
 """
 
+from .matching import ChapterMatch, match_chapter, match_chapter_in, normalize_chapter_name
 from .registry import SourceRegistry
 from .rss_service import KIND_FEED, KIND_LEGADO, RssService
 from .service import (
@@ -63,6 +64,7 @@ from .storage import (
 
 __all__ = [
     "AggregatedBook",
+    "ChapterMatch",
     "DEFAULT_SEARCH_SOURCES",
     "DEFAULT_SEARCH_WORKERS",
     "KIND_FEED",
@@ -104,6 +106,9 @@ __all__ = [
     "list_source_prefs",
     "list_subscriptions",
     "mark_all_read",
+    "match_chapter",
+    "match_chapter_in",
+    "normalize_chapter_name",
     "record_source_result",
     "record_subscription_fetch",
     "remove_shelf_book",

@@ -28,7 +28,7 @@ from ..engine import (
     UnsupportedFeatureError,
 )
 from ..net import RequestsFetcher
-from . import storage
+from . import matching, storage
 from .registry import SourceRegistry
 
 logger = getLogger("funread")
@@ -404,18 +404,86 @@ class ReaderService:
         url_id: int,
         book_url: str,
         user_id: int = storage.LOCAL_USER_ID,
-    ) -> None:
-        """换源。缓存必须清掉 —— 不同源的章节切分方式不同，序号对不上。
+        remap_progress: bool = True,
+    ) -> Dict[str, Any]:
+        """换源，并把阅读进度重新定位到新源的目录里。
 
-        缓存是全局共享的，所以这里清掉的是所有人的 —— 但换源本身就意味着原来那套
-        序号不再可信，留着比清掉更糟。
+        缓存必须清掉 —— 不同源的章节切分方式不同，序号对不上。缓存是全局共享的，
+        所以这里清掉的是所有人的，但换源本身就意味着原来那套序号不再可信，留着
+        比清掉更糟。
+
+        **进度必须重新定位，这是数据正确性问题而不只是体验问题。** 不重定位的话
+        书架上仍写着「读到第 500 章」，而那个序号在新源下指向别的内容 —— 用户点
+        「续读」会跳到一个陌生位置，而且看不出哪里错了。
+
+        重定位要联网取新源的目录。取不到就保留原进度并在返回值里说明
+        （`method="none"`），**不**假装成功 —— 让调用方去提示用户手动选章。
+
+        `remap_progress=False` 用于「还没开始读就换源」：没有进度可搬，省掉一次
+        目录抓取。
         """
+        before = storage.get_progress(book_key, user_id=user_id, database_url=self.database_url)
         storage.upsert_shelf_book(
             {"book_key": book_key, "url_id": url_id, "book_url": book_url, "toc_url": ""},
             user_id=user_id,
             database_url=self.database_url,
         )
         storage.clear_chapter_cache(book_key, database_url=self.database_url)
+
+        if not remap_progress or before is None:
+            return {
+                "method": matching.MATCH_NONE if before is not None else "skipped",
+                "chapter_index": before.chapter_index if before else 0,
+                "chapter_name": before.chapter_name if before else "",
+                "total": 0,
+            }
+
+        book = storage.get_shelf_book(book_key, user_id=user_id, database_url=self.database_url)
+        try:
+            info = self.book_info(
+                url_id,
+                book_url,
+                name=book.name if book else "",
+                author=book.author if book else "",
+            )
+            chapters = self.toc(url_id, info)
+        except Exception as exc:
+            #  新源的目录取不到。源已经换了（那一步是本地的、已经落库），只是
+            #  没法重定位 —— 如实返回，别把一次抓取失败变成整个换源失败。
+            logger.debug(f"Could not remap progress after switching source: {exc}")
+            return {
+                "method": matching.MATCH_NONE,
+                "chapter_index": before.chapter_index,
+                "chapter_name": before.chapter_name,
+                "total": 0,
+            }
+
+        match = matching.match_chapter_in(
+            chapter_name=before.chapter_name,
+            chapter_index=before.chapter_index,
+            old_total=max(before.chapter_index + 1, len(chapters)),
+            new_chapters=chapters,
+        )
+        if match.method != matching.MATCH_NONE:
+            target = chapters[match.index]
+            storage.save_progress(
+                book_key=book_key,
+                chapter_index=match.index,
+                chapter_url=target.url,
+                chapter_name=target.name,
+                #  字符偏移不能跨章沿用 —— 新源这一章的长度和分段都不一样，
+                #  沿用会把人扔到一个随机位置。退回章首是唯一诚实的选择。
+                char_offset=0,
+                user_id=user_id,
+                database_url=self.database_url,
+            )
+        return {
+            "method": match.method,
+            "chapter_index": match.index,
+            "chapter_name": match.name,
+            "total": match.total,
+            "is_approximate": match.is_approximate,
+        }
 
 
 __all__ = [
