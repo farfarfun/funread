@@ -151,24 +151,30 @@ class ReaderService:
 
     # ------------------------------------------------------------------ 搜索
 
-    def search(
+    def search_report(
         self,
         keyword: str,
         max_sources: int = DEFAULT_SEARCH_SOURCES,
         workers: int = DEFAULT_SEARCH_WORKERS,
-    ) -> List[Dict[str, Any]]:
-        """跨源聚合搜索。按 `书名+作者` 合并同一本书的多个来源。
+    ) -> Dict[str, Any]:
+        """跨源聚合搜索，连带返回这一轮的源统计。
 
-        返回顺序是「命中的源最多的排前面」：被多个站点同时收录的书，通常既是
-        用户要找的那本，也更有换源余地。
+        按 `书名+作者` 合并同一本书的多个来源。返回顺序是「命中的源最多的排前面」：
+        被多个站点同时收录的书，通常既是用户要找的那本，也更有换源余地。
+
+        统计是给前端用的 —— 聚合搜索慢且会有大量单源失败，没有这组数字时「搜不到」
+        和「十个源里九个需要 JS」在界面上长得一模一样，用户只会以为是 bug。
+        `js_skipped` 单独计：那是结构性不支持，换关键词也没用。
         """
         keyword = (keyword or "").strip()
+        stats = {"sources_tried": 0, "sources_ok": 0, "js_skipped": 0, "failed": 0}
         if not keyword:
-            return []
+            return {"items": [], "total": 0, **stats}
 
         candidates = self.registry.candidates(limit=max_sources)
         if not candidates:
-            return []
+            return {"items": [], "total": 0, **stats}
+        stats["sources_tried"] = len(candidates)
 
         aggregated: Dict[str, AggregatedBook] = {}
         order: List[str] = []
@@ -185,10 +191,17 @@ class ReaderService:
             for future in as_completed(futures):
                 try:
                     url_id, books = future.result()
+                except (JsNotSupportedError, UnsupportedFeatureError) as exc:
+                    #  结构性不支持，和「站点这次抽风」是两回事，要分开报给前端
+                    stats["js_skipped"] += 1
+                    logger.debug(f"Search skipped a source needing JS: {exc}")
+                    continue
                 except Exception as exc:
                     #  单源失败是常态，已经记进 fail_count 了，这里只留个 debug
+                    stats["failed"] += 1
                     logger.debug(f"Search failed on one source: {exc}")
                     continue
+                stats["sources_ok"] += 1
                 for book in books:
                     if not book.name.strip():
                         continue
@@ -202,7 +215,17 @@ class ReaderService:
 
         results = [aggregated[key] for key in order]
         results.sort(key=lambda item: len(item.sources), reverse=True)
-        return [item.to_dict() for item in results]
+        items = [item.to_dict() for item in results]
+        return {"items": items, "total": len(items), **stats}
+
+    def search(
+        self,
+        keyword: str,
+        max_sources: int = DEFAULT_SEARCH_SOURCES,
+        workers: int = DEFAULT_SEARCH_WORKERS,
+    ) -> List[Dict[str, Any]]:
+        """只要结果、不要统计时的薄包装。"""
+        return self.search_report(keyword, max_sources=max_sources, workers=workers)["items"]
 
     def sources_for(
         self,
