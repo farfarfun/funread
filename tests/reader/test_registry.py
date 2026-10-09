@@ -149,7 +149,13 @@ def test_scan_survives_a_corrupt_file(registry, tmp_path):
 
 
 def test_scan_on_an_empty_archive(registry):
-    assert registry.scan() == {"scanned": 0, "complete": 0, "needs_js": 0, "enabled": 0}
+    assert registry.scan() == {
+        "scanned": 0,
+        "complete": 0,
+        "needs_js": 0,
+        "web_view": 0,
+        "enabled": 0,
+    }
 
 
 # ------------------------------------------------------------------ 选源

@@ -183,6 +183,66 @@ class ReaderChapterCache(ReaderBase):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class ReaderRssSubscription(ReaderBase):
+    """一条订阅。两种来源共用一张表，由 `kind` 区分。
+
+    `kind="legado"` → 用归档里的 Legado RSS 源（`url_id` 指过去）；
+    `kind="feed"`  → 用户自己贴的标准 feed 地址（`feed_url`）。
+
+    两条腿共用同一张表、同一组 API，是因为对前端来说它们就是「我的订阅」里的
+    一行，没有任何交互差别。差别只在抓取时怎么解析，那是 `rss_service` 的事。
+
+    `(user_id, sub_id)` 复合主键：`sub_id` 由 `(kind, 来源标识)` 算出来，所以两个
+    人订同一个源会得到同一个 `sub_id`，必须带上 `user_id` 才不会撞。
+    """
+
+    __tablename__ = "reader_rss_subscription"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=LOCAL_USER_ID)
+    sub_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="feed")
+    #: `kind="legado"` 时有效，指向归档里的源。
+    url_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: `kind="feed"` 时有效，用户给的 feed 地址。
+    feed_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    icon: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    group: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    last_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class ReaderRssArticleState(ReaderBase):
+    """一篇文章的已读 / 收藏状态。
+
+    **只存状态，不存正文。** 订阅文章时效性强，缓存正文的收益很低而占用很高 ——
+    一个活跃订阅一周就是几千篇。标题和链接存一份是为了「收藏」列表能脱离原始
+    列表单独渲染（文章翻过几页之后原列表就拿不到了）。
+
+    `article_key` 是 `md5(link)`：feed 里的 guid 五花八门（有的根本没有），
+    链接是唯一一个所有来源都有、且稳定的标识。
+    """
+
+    __tablename__ = "reader_rss_article_state"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=LOCAL_USER_ID)
+    sub_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    article_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    favorited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    link: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    pub_date: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    image: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 _INITIALIZED_DATABASES: set = set()
 
 
@@ -709,38 +769,315 @@ def clear_chapter_cache(book_key: str, database_url: Optional[str] = None) -> in
         return int(result.rowcount or 0)
 
 
+# ------------------------------------------------------------------ 订阅源
+
+
+def compute_sub_id(kind: str, identifier: str) -> str:
+    """订阅的稳定标识。
+
+    由 `(kind, 来源标识)` 算出来而不是自增：同一个人重复订同一个源应当是幂等的，
+    而自增主键会让它变成两条。两个人订同一个源会得到同一个 `sub_id`，所以表的
+    主键必须是 `(user_id, sub_id)`。
+    """
+    normalized = f"{(kind or '').strip()}\n{(identifier or '').strip()}"
+    if not (identifier or "").strip():
+        raise ValueError("identifier is required")
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def compute_article_key(link: str) -> str:
+    """`md5(link)`。feed 的 guid 五花八门，链接是唯一普遍可用的稳定标识。"""
+    normalized = (link or "").strip()
+    if not normalized:
+        raise ValueError("link is required")
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def list_subscriptions(
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> List[ReaderRssSubscription]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = (
+            select(ReaderRssSubscription)
+            .where(ReaderRssSubscription.user_id == int(user_id))
+            .order_by(ReaderRssSubscription.created_at.asc())
+        )
+        return list(session.execute(stmt).scalars().all())
+
+
+def get_subscription(
+    sub_id: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> Optional[ReaderRssSubscription]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        return session.get(ReaderRssSubscription, (int(user_id), sub_id))
+
+
+def upsert_subscription(
+    payload: Dict[str, Any],
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> str:
+    """订阅 / 更新订阅，返回 `sub_id`。重复订阅同一个源是幂等的。
+
+    `user_id` 由调用方给，不从 payload 取 —— 同 `upsert_shelf_book` 的理由。
+    """
+    kind = str(payload.get("kind") or "feed")
+    identifier = (
+        str(payload.get("url_id") or "") if kind == "legado" else str(payload.get("feed_url") or "")
+    )
+    sub_id = payload.get("sub_id") or compute_sub_id(kind, identifier)
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        row = session.get(ReaderRssSubscription, (int(user_id), sub_id))
+        if row is None:
+            row = ReaderRssSubscription(user_id=int(user_id), sub_id=sub_id, kind=kind)
+            session.add(row)
+        for field_name, value in payload.items():
+            if field_name in ("sub_id", "user_id"):
+                continue
+            if hasattr(row, field_name) and value is not None:
+                setattr(row, field_name, value)
+        row.updated_at = utcnow()
+        session.commit()
+    return sub_id
+
+
+def remove_subscription(
+    sub_id: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> bool:
+    """退订。连带清掉这个人在这个订阅下的全部文章状态。"""
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        row = session.get(ReaderRssSubscription, (int(user_id), sub_id))
+        if row is None:
+            return False
+        session.delete(row)
+        session.execute(
+            delete(ReaderRssArticleState).where(
+                ReaderRssArticleState.user_id == int(user_id),
+                ReaderRssArticleState.sub_id == sub_id,
+            )
+        )
+        session.commit()
+        return True
+
+
+def record_subscription_fetch(
+    sub_id: str,
+    user_id: int = LOCAL_USER_ID,
+    error: str = "",
+    database_url: Optional[str] = None,
+) -> None:
+    """记一次抓取结果。成功清掉上次的错误，失败留下原因给界面显示。"""
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        row = session.get(ReaderRssSubscription, (int(user_id), sub_id))
+        if row is None:
+            return
+        row.last_fetched_at = utcnow()
+        row.last_error = (error or "")[:1024] or None
+        session.commit()
+
+
+def get_article_states(
+    sub_id: str,
+    article_keys: List[str],
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> Dict[str, ReaderRssArticleState]:
+    """批量取状态，按 `article_key` 索引。
+
+    批量而不是逐条：一页文章二十条，逐条查会是二十次往返。
+    """
+    if not article_keys:
+        return {}
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = select(ReaderRssArticleState).where(
+            ReaderRssArticleState.user_id == int(user_id),
+            ReaderRssArticleState.sub_id == sub_id,
+            ReaderRssArticleState.article_key.in_(list(article_keys)),
+        )
+        return {row.article_key: row for row in session.execute(stmt).scalars().all()}
+
+
+def set_article_state(
+    sub_id: str,
+    article_key: str,
+    user_id: int = LOCAL_USER_ID,
+    read: Optional[bool] = None,
+    favorited: Optional[bool] = None,
+    meta: Optional[Dict[str, str]] = None,
+    database_url: Optional[str] = None,
+) -> None:
+    """标已读 / 收藏。`read` 与 `favorited` 给 `None` 表示不动那一项。
+
+    `meta`（标题/链接/时间/配图）在建行时写一份，之后不覆盖 —— 收藏列表要能脱离
+    原始列表单独渲染，而文章翻过几页之后原列表就拿不到这些字段了。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        row = session.get(ReaderRssArticleState, (int(user_id), sub_id, article_key))
+        if row is None:
+            row = ReaderRssArticleState(
+                user_id=int(user_id), sub_id=sub_id, article_key=article_key
+            )
+            for name, value in (meta or {}).items():
+                if hasattr(row, name) and value is not None:
+                    setattr(row, name, value)
+            session.add(row)
+        if read is not None:
+            row.read = bool(read)
+        if favorited is not None:
+            row.favorited = bool(favorited)
+        row.updated_at = utcnow()
+        session.commit()
+
+
+def mark_all_read(
+    sub_id: str,
+    article_keys: List[str],
+    user_id: int = LOCAL_USER_ID,
+    metas: Optional[Dict[str, Dict[str, str]]] = None,
+    database_url: Optional[str] = None,
+) -> int:
+    """把给定的一批文章全标已读，返回实际改动的条数。
+
+    要调用方把 `article_keys` 传进来，而不是「这个订阅下的全部」：服务端并不
+    知道这个订阅一共有哪些文章 —— 状态表里只有被交互过的那些。界面上「全部
+    已读」的语义本来也是「当前列出来的这些」。
+    """
+    if not article_keys:
+        return 0
+    session_factory = get_session_factory(database_url)
+    changed = 0
+    with session_factory() as session:
+        existing = {
+            row.article_key: row
+            for row in session.execute(
+                select(ReaderRssArticleState).where(
+                    ReaderRssArticleState.user_id == int(user_id),
+                    ReaderRssArticleState.sub_id == sub_id,
+                    ReaderRssArticleState.article_key.in_(list(article_keys)),
+                )
+            )
+            .scalars()
+            .all()
+        }
+        for key in article_keys:
+            row = existing.get(key)
+            if row is None:
+                row = ReaderRssArticleState(
+                    user_id=int(user_id), sub_id=sub_id, article_key=key, read=True
+                )
+                for name, value in ((metas or {}).get(key) or {}).items():
+                    if hasattr(row, name) and value is not None:
+                        setattr(row, name, value)
+                session.add(row)
+                changed += 1
+            elif not row.read:
+                row.read = True
+                row.updated_at = utcnow()
+                changed += 1
+        session.commit()
+    return changed
+
+
+def count_read(
+    sub_id: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> int:
+    """这个订阅下已读了多少篇。
+
+    注意**没有**「未读数」—— 服务端不知道一个订阅总共有多少篇文章（不缓存列表），
+    所以未读数只能由前端用「本页条数 - 本页已读数」算，算的是当前这一页。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        return int(
+            session.execute(
+                select(func.count())
+                .select_from(ReaderRssArticleState)
+                .where(
+                    ReaderRssArticleState.user_id == int(user_id),
+                    ReaderRssArticleState.sub_id == sub_id,
+                    ReaderRssArticleState.read.is_(True),
+                )
+            ).scalar_one()
+        )
+
+
+def list_favorites(
+    user_id: int = LOCAL_USER_ID,
+    sub_id: Optional[str] = None,
+    database_url: Optional[str] = None,
+) -> List[ReaderRssArticleState]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = select(ReaderRssArticleState).where(
+            ReaderRssArticleState.user_id == int(user_id),
+            ReaderRssArticleState.favorited.is_(True),
+        )
+        if sub_id:
+            stmt = stmt.where(ReaderRssArticleState.sub_id == sub_id)
+        stmt = stmt.order_by(ReaderRssArticleState.updated_at.desc())
+        return list(session.execute(stmt).scalars().all())
+
+
 __all__ = [
     "LOCAL_USER_ID",
     "MIN_PASSWORD_LENGTH",
-    "USERNAME_PATTERN",
     "ReaderBase",
     "ReaderChapterCache",
     "ReaderProgress",
+    "ReaderRssArticleState",
+    "ReaderRssSubscription",
     "ReaderShelfBook",
     "ReaderSourcePref",
     "ReaderUser",
+    "USERNAME_PATTERN",
     "authenticate",
     "claim_local_data",
     "clear_chapter_cache",
+    "compute_article_key",
     "compute_book_key",
+    "compute_sub_id",
+    "count_read",
     "count_users",
     "create_user",
+    "get_article_states",
     "get_cached_chapter",
     "get_progress",
     "get_session_factory",
     "get_shelf_book",
+    "get_subscription",
     "get_user",
     "get_user_by_name",
     "hash_password",
     "init_reader_db",
     "list_cached_chapter_indexes",
+    "list_favorites",
     "list_shelf",
     "list_source_prefs",
+    "list_subscriptions",
+    "mark_all_read",
     "record_source_result",
+    "record_subscription_fetch",
     "remove_shelf_book",
+    "remove_subscription",
     "save_cached_chapter",
     "save_progress",
+    "set_article_state",
     "upsert_shelf_book",
     "upsert_source_prefs",
+    "upsert_subscription",
     "verify_password",
 ]
