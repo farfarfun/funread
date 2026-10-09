@@ -89,6 +89,21 @@ _GROUP_ALIASES: Dict[str, Dict[str, str]] = {
 
 _RULE_GROUPS = ("ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent")
 
+#: 订阅源的组名。只有一个 —— RSS 源的规则在 Legado 里全是扁平字段，没有嵌套结构。
+_RSS_RULE_GROUPS = ("ruleRss",)
+
+#: `ruleRss: {...}` 嵌套形态里的别名 → 规范名。
+_RSS_GROUP_ALIASES: Dict[str, str] = {
+    "list": "articles",
+    "articleList": "articles",
+    "nextArticles": "nextPage",
+    "nextUrl": "nextPage",
+    "urlNext": "nextPage",
+    "date": "pubDate",
+    "describe": "description",
+    "introduce": "description",
+}
+
 # Legado 2.x 的扁平字段名 → (组, 规范名)。
 # 与采集侧 `manage/download/sources/book.py` 的 `__format_base` 一致，只有一处故意不同：
 # `ruleBookContent` 直接进 `ruleContent.content` —— 它是**章节正文**规则，
@@ -149,6 +164,39 @@ CORE_FIELDS: Tuple[Tuple[str, ...], ...] = (
     ("ruleToc", "chapterName"),
     ("ruleToc", "chapterUrl"),
     ("ruleContent", "content"),
+)
+
+# 订阅源的扁平字段名 → (组, 规范名)。
+#
+# `ruleNextPage` 与 `ruleNextArticles` 归一到同一个键：前者是归档里真正在用的名字
+# （1,344 个源里 449 个 / 33.4%），后者是我们自家 `manage/publish/rss.py` 产出的源
+# 在用。两个都要认，`_collect_flat_rules` 按本表的声明顺序定优先级，所以把
+# `ruleNextPage` 放在前面。
+#
+# `ruleContent` 在这里进 `ruleRss.content` 而不是书源的 `ruleContent` 组 —— 两套
+# 归一化按 `source_type` 完全分派，一个 RSS 源不该冒出 `ruleToc`，反之亦然。
+_RSS_FLAT_TO_GROUP: Dict[str, Tuple[str, str]] = {
+    "ruleArticles": ("ruleRss", "articles"),
+    "ruleTitle": ("ruleRss", "title"),
+    "ruleLink": ("ruleRss", "link"),
+    "rulePubDate": ("ruleRss", "pubDate"),
+    "ruleImage": ("ruleRss", "image"),
+    "ruleDescription": ("ruleRss", "description"),
+    "ruleContent": ("ruleRss", "content"),
+    "ruleNextPage": ("ruleRss", "nextPage"),
+    "ruleNextArticles": ("ruleRss", "nextPage"),
+}
+
+# 订阅源的核心链路字段，只有三个。
+#
+# 书源要八个是因为它有「搜索→详情→目录→正文」四段；RSS 只有「列表→（可选）正文」，
+# 拿到一个能遍历的列表和每项的标题就已经能用了。`ruleLink` 实测只有 40.3%，但缺了
+# 可以拿列表项自身的 href 兜底（见 `RssSourceEngine._link_of`），所以不进核心集 ——
+# 把它算进去会把可用源从 10.8% 再砍掉一截，而那部分其实是能跑的。
+RSS_CORE_FIELDS: Tuple[Tuple[str, ...], ...] = (
+    ("sourceUrl",),
+    ("ruleRss", "articles"),
+    ("ruleRss", "title"),
 )
 
 
@@ -219,6 +267,14 @@ class SourceSpec:
     book_source_type: int = 0
     respond_time: int = 0
     enabled: bool = True
+    #: 订阅源的图标地址（`sourceIcon`，48.4% 的源有）。
+    icon: str = ""
+    #: 订阅源的多分类入口，多行 `名称::URL`（`sortUrl`，32.4%）。
+    sort_url: str = ""
+    #: 非空表示这是个 WebView 型源（`singleUrl`，21.9%）—— 纯 Python 跑不了。
+    single_url: str = ""
+    #: 相对链接要不要按页面地址绝对化（`loadWithBaseUrl`，94.4% 开着）。
+    load_with_base_url: bool = False
     variables: Dict[str, str] = field(default_factory=dict)
     _groups: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
@@ -228,8 +284,9 @@ class SourceSpec:
     def from_dict(cls, data: Mapping[str, Any], *, source_type: str = "book") -> "SourceSpec":
         payload = _unwrap(data)
         normalized = _normalize_top(payload)
-        groups = _normalize_groups(normalized)
-        _repair_content_rule(groups)
+        groups = _normalize_groups(normalized, source_type)
+        if source_type != "rss":
+            _repair_content_rule(groups)
 
         url = source_base_url(
             _as_text(normalized.get("bookSourceUrl") or normalized.get("sourceUrl"))
@@ -250,6 +307,11 @@ class SourceSpec:
             book_source_type=_coerce_int(normalized.get("bookSourceType")),
             respond_time=_coerce_int(normalized.get("respondTime")),
             enabled=_as_bool(normalized.get("enabled", True)),
+            icon=_as_text(normalized.get("sourceIcon") or normalized.get("bookSourceIcon")),
+            sort_url=_as_text(normalized.get("sortUrl")),
+            single_url=_as_text(normalized.get("singleUrl")),
+            #  94.4% 的订阅源开着这个开关，所以默认 False 但几乎总会被显式打开
+            load_with_base_url=_as_bool(normalized.get("loadWithBaseUrl", False)),
             _groups=groups,
         )
         return spec
@@ -345,15 +407,49 @@ class SourceSpec:
 
     # ------------------------------------------------------------ 体检（选源用）
 
+    @property
+    def is_rss(self) -> bool:
+        return self.source_type == "rss"
+
+    @property
+    def is_web_view(self) -> bool:
+        """WebView 型订阅源（`singleUrl` 非空）。纯 Python 跑不了，占归档 21.9%。
+
+        这类源不是「规则不全」—— 它的规则可能齐，但工作方式是把一个页面塞进
+        WebView 里让用户直接看。引擎对它必须显式抛 `WebViewNotSupportedError`，
+        不能静默返空，否则界面上和「这个源今天没更新」分不出来。
+        """
+        return bool(self.single_url.strip())
+
+    @property
+    def rss_categories(self) -> List[ExploreKind]:
+        """`sortUrl` 的多分类入口。没有 `sortUrl` 时退化成单分类 = 源地址本身。"""
+        kinds = [
+            ExploreKind(name=name, url=url)
+            for name, url in parse_named_urls(self.sort_url)
+            if url
+        ]
+        if kinds:
+            return kinds
+        return [ExploreKind(name=self.name or "全部", url=self.url)] if self.url else []
+
     def missing_core_fields(self) -> List[str]:
         """缺哪些核心链路字段。空列表 = 规则完整。
 
-        实测 19% 的代表源是空壳（只有 url + name），选源前必须用这个过滤掉，
-        否则「JS-free 比例」会虚高约 5 个百分点。
+        实测 19% 的书源代表源是空壳（只有 url + name），选源前必须用这个过滤掉，
+        否则「JS-free 比例」会虚高约 5 个百分点。订阅源的核心集是另一套
+        （`RSS_CORE_FIELDS`，只有三个）—— 拿书源那八个字段去量 RSS 源，`is_complete`
+        永远是 False，一个订阅源都进不了候选池。
         """
+        fields = RSS_CORE_FIELDS if self.is_rss else CORE_FIELDS
         missing: List[str] = []
-        for path in CORE_FIELDS:
-            value = self.search_url if path == ("searchUrl",) else self.rule(*path)
+        for path in fields:
+            if path == ("searchUrl",):
+                value = self.search_url
+            elif path == ("sourceUrl",):
+                value = self.url
+            else:
+                value = self.rule(*path)
             if not value.strip():
                 missing.append(".".join(path))
         return missing
@@ -364,8 +460,13 @@ class SourceSpec:
 
     def needs_js(self) -> bool:
         """静态扫描全部规则串有没有 JS。零网络、零求值。"""
-        rules: List[str] = [self.search_url, self.explore_url, self.login_url]
-        for group in _RULE_GROUPS:
+        if self.is_rss:
+            rules = [self.url, self.sort_url, self.single_url, self.login_url]
+            groups = _RSS_RULE_GROUPS
+        else:
+            rules = [self.search_url, self.explore_url, self.login_url]
+            groups = _RULE_GROUPS
+        for group in groups:
             rules.extend(self._groups.get(group, {}).values())
         return scan_features(rules)["needs_js"]
 
@@ -463,26 +564,61 @@ def _is_blank(value: Any) -> bool:
     return False
 
 
-def _collect_flat_rules(data: Mapping[str, Any]) -> Dict[str, Dict[str, str]]:
-    """把 Legado 2.x 的扁平字段收进对应的组。"""
+def _collect_flat_rules(
+    data: Mapping[str, Any],
+    mapping: Mapping[str, Tuple[str, str]],
+) -> Dict[str, Dict[str, str]]:
+    """把扁平字段收进对应的组。
+
+    迭代的是**映射表**而不是源数据：好几个旧字段名指向同一个规范名
+    （`ruleNextPage`/`ruleNextArticles`、`ruleContentUrl`/`ruleContentUrlNext`），
+    按源 JSON 的键序决定谁赢会让同一个源在不同序列化下解析出不同结果。
+    按声明顺序来，优先级就是本文件里写死的那个。
+    """
     groups: Dict[str, Dict[str, str]] = {}
-    for key, value in data.items():
-        target = _FLAT_TO_GROUP.get(key)
-        if target is None:
-            continue
-        text = _as_text(value)
+    for key, (group, name) in mapping.items():
+        text = _as_text(data.get(key))
         if not text.strip():
             continue
-        group, name = target
         bucket = groups.setdefault(group, {})
         if not bucket.get(name, "").strip():
             bucket[name] = text
     return groups
 
 
-def _normalize_groups(data: Mapping[str, Any]) -> Dict[str, Dict[str, str]]:
+def _normalize_rss_groups(data: Mapping[str, Any]) -> Dict[str, Dict[str, str]]:
+    """订阅源的规则归一化。
+
+    RSS 源在 Legado 里全是扁平字段，但 3.x 允许写成 `ruleRss: {...}`，所以嵌套
+    形态也认，并让它覆盖扁平值。
+    """
+    groups = _collect_flat_rules(data, _RSS_FLAT_TO_GROUP)
+    raw_group = data.get("ruleRss")
+    if isinstance(raw_group, Mapping):
+        rules = dict(groups.get("ruleRss", {}))
+        for key, value in raw_group.items():
+            name = _RSS_GROUP_ALIASES.get(key, key)
+            text = _as_text(value)
+            if text.strip():
+                rules[name] = text
+        if rules:
+            groups["ruleRss"] = rules
+    return groups
+
+
+def _normalize_groups(
+    data: Mapping[str, Any],
+    source_type: str = "book",
+) -> Dict[str, Dict[str, str]]:
+    """归一化规则组。两套表按 `source_type` 完全分派。
+
+    不混着来：RSS 源的 `ruleContent` 是一条字符串规则，书源的 `ruleContent` 是一个
+    组；共用一张表会让 RSS 源长出 `ruleToc`，也会让书源的正文规则被当成 RSS 正文。
+    """
+    if source_type == "rss":
+        return _normalize_rss_groups(data)
     #  扁平字段先铺底，嵌套结构（3.x 的规范形态）覆盖它。
-    groups: Dict[str, Dict[str, str]] = _collect_flat_rules(data)
+    groups: Dict[str, Dict[str, str]] = _collect_flat_rules(data, _FLAT_TO_GROUP)
     for group in _RULE_GROUPS:
         raw_group = data.get(group)
         rules: Dict[str, str] = dict(groups.get(group, {}))
@@ -531,4 +667,4 @@ def load_source(data: Mapping[str, Any], *, source_type: str = "book") -> Source
     return SourceSpec.from_dict(data, source_type=source_type)
 
 
-__all__ = ["CORE_FIELDS", "SourceSpec", "load_source"]
+__all__ = ["CORE_FIELDS", "RSS_CORE_FIELDS", "SourceSpec", "load_source"]

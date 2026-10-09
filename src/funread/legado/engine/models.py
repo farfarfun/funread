@@ -91,6 +91,20 @@ class RssArticle:
 
 
 @dataclass
+class RssPage:
+    """订阅源文章列表的一页。
+
+    一次只返回一页，而不是像书源目录那样把所有页走完：订阅列表是「加载更多」
+    的交互，而且订阅源动辄几十页，一次全抓既慢又没人看。`next_url` 为空表示
+    没有下一页了。
+    """
+
+    items: List["RssArticle"] = field(default_factory=list)
+    next_url: str = ""
+    category: str = ""
+
+
+@dataclass
 class ExploreKind:
     """发现页的一个分类入口（`名称::URL` 里的一行）。"""
 
@@ -104,6 +118,7 @@ __all__ = [
     "Chapter",
     "ChapterContent",
     "ExploreKind",
+    "RssPage",
     "RssArticle",
     "SearchBook",
 ]

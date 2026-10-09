@@ -19,6 +19,7 @@ from .errors import (
 )
 from .evaluator import RuleEvaluator, join_url, source_base_url
 from .expr import MiniExpr
+from .feed import feed_title, looks_like_feed, parse_feed
 from .fetch import Fetcher, Page, Request, StaticFetcher, parse_url_options
 from .js import JsContext, JsRuntime, NullJsRuntime, default_js_runtime
 from .lexer import (
@@ -27,13 +28,23 @@ from .lexer import (
     parse_rule,
     scan_features,
 )
-from .models import BookInfo, Chapter, ChapterContent, ExploreKind, RssArticle, SearchBook
-from .source import CORE_FIELDS, SourceSpec, load_source
+from .models import (
+    BookInfo,
+    Chapter,
+    ChapterContent,
+    ExploreKind,
+    RssArticle,
+    RssPage,
+    SearchBook,
+)
+from .rss import MAX_ARTICLE_PAGES, RssSourceEngine, absolutize_html
+from .source import CORE_FIELDS, RSS_CORE_FIELDS, SourceSpec, load_source
 from .values import RuleValue
 from .variables import VariableScope
 
 __all__ = [
     "CORE_FIELDS",
+    "MAX_ARTICLE_PAGES",
     "MAX_CONTENT_PAGES",
     "MAX_TOC_PAGES",
     "BookInfo",
@@ -51,7 +62,10 @@ __all__ = [
     "NullJsRuntime",
     "Page",
     "Request",
+    "RSS_CORE_FIELDS",
     "RssArticle",
+    "RssPage",
+    "RssSourceEngine",
     "RuleEmptyError",
     "RuleError",
     "RuleEvaluator",
@@ -63,12 +77,16 @@ __all__ = [
     "UnsupportedFeatureError",
     "VariableScope",
     "WebViewNotSupportedError",
+    "absolutize_html",
     "default_js_runtime",
+    "feed_title",
     "join_url",
     "load_source",
+    "looks_like_feed",
     "parse_named_urls",
     "parse_replace_regex",
     "parse_rule",
+    "parse_feed",
     "parse_url_options",
     "pick_best",
     "scan_features",
