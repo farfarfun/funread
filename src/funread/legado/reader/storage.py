@@ -114,6 +114,25 @@ class ReaderShelfBook(ReaderBase):
     book_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     toc_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     last_chapter: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    #: 分组名。空串 = 未分组，**不是** NULL —— 分组是一个普通字符串标签而不是一张表，
+    #: 允许 NULL 只会多出「NULL 和空串算不算同一组」这个问题。和
+    #: `reader_rss_subscription.group` 同名同形状。
+    #:
+    #: `server_default` 是必需的，不是修饰：`default=` 只在 Python 侧生效，建表 DDL
+    #: 里不会有 DEFAULT 子句。而 `_migrate_user_scope` 重建这张表时是用一条
+    #: `INSERT ... SELECT <旧表的列>` 搬数据的，没点到的新列必须由数据库自己填上
+    #: —— 否则那条 NOT NULL 会让整个升级路径崩在半路。
+    group: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", server_default="", index=True
+    )
+    #: 最近一次检查更新时数到的章节总数。0 = 还没查过（**不是**「这本书没有章节」）。
+    #: 未读数由它和阅读进度算出来，不单独存 —— 存了就会和进度不同步。
+    chapter_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 上次检查失败的原因。成功时清空 —— 留着会让界面一直显示一个已经修好的错误。
+    last_check_error: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
@@ -243,6 +262,12 @@ _USER_SCOPED_TABLES = {
 #: 格式：表名 → [(列名, DDL 片段)]
 _ADDED_COLUMNS = {
     "reader_source_prefs": [("has_explore", "BOOLEAN NOT NULL DEFAULT 0")],
+    "reader_shelf": [
+        ("group", "VARCHAR(128) NOT NULL DEFAULT ''"),
+        ("chapter_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_checked_at", "DATETIME NULL"),
+        ("last_check_error", "VARCHAR(512) NULL"),
+    ],
 }
 
 
@@ -253,6 +278,10 @@ def _migrate_added_columns(engine) -> None:
     加列是幂等的 —— 先看 `inspect` 里有没有，有就跳过。
     """
     inspector = inspect(engine)
+    #  列名过一遍方言的引用规则。`group` 在 SQLite 和 MySQL 都是保留字，裸写进
+    #  DDL 会直接语法错误；而两边的引号还不一样（MySQL 要反引号）。`create_all`
+    #  走的是 SQLAlchemy 自己的编译器，本来就引用好了，只有这条手写 DDL 要自己管。
+    quote = engine.dialect.identifier_preparer.quote
     existing_tables = set(inspector.get_table_names())
     for table, columns in _ADDED_COLUMNS.items():
         if table not in existing_tables:
@@ -262,7 +291,9 @@ def _migrate_added_columns(engine) -> None:
             if name in present:
                 continue
             with engine.begin() as connection:
-                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                connection.execute(
+                    text(f"ALTER TABLE {quote(table)} ADD COLUMN {quote(name)} {ddl}")
+                )
             logger.info(f"{table} 已补上 {name} 列")
 
 
@@ -471,19 +502,150 @@ def record_source_result(
 # ------------------------------------------------------------------ 书架
 
 
+#: 写进 `UPDATE ... SET updated_at = reader_shelf.updated_at`，等于不动这一列。
+#:
+#: 需要它是因为 `updated_at` 带 `onupdate=utcnow`：只要这一列没出现在 SET 子句里，
+#: SQLAlchemy 就会替你填上当前时间。而 `updated_at` 排序着整个书架（最近在读的在
+#: 前），所以「移动分组」和「后台检查更新」这两类操作都不能碰它 —— 跑一次全量检查
+#: 就会把书架顺序打乱成「按检查顺序排」，而那个顺序对用户毫无意义。
+#: 显式给值（哪怕给的是它自己）就能压掉 `onupdate`。
+_PRESERVE_UPDATED_AT = ReaderShelfBook.updated_at
+
+
 def list_shelf(
     user_id: int = LOCAL_USER_ID,
+    group: Optional[str] = None,
     database_url: Optional[str] = None,
 ) -> List[ReaderShelfBook]:
-    """某个人的书架，最近读过的排前面。"""
+    """某个人的书架，最近读过的排前面。
+
+    `group=None` 是整个书架；`group=""` 是**只要未分组的那些**。两者必须分开 ——
+    「未分组」是一个真实的分组视图，不是「不筛选」。
+    """
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        stmt = (
-            select(ReaderShelfBook)
-            .where(ReaderShelfBook.user_id == int(user_id))
-            .order_by(ReaderShelfBook.updated_at.desc())
-        )
+        stmt = select(ReaderShelfBook).where(ReaderShelfBook.user_id == int(user_id))
+        if group is not None:
+            stmt = stmt.where(ReaderShelfBook.group == group)
+        stmt = stmt.order_by(ReaderShelfBook.updated_at.desc())
         return list(session.execute(stmt).scalars().all())
+
+
+def list_shelf_groups(
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """这个人用过的分组和各组书数，未分组（空串）排最后。
+
+    分组没有自己的表，所以「有哪些分组」就是书架上出现过哪些值 —— 代价是空分组
+    留不住（最后一本书移走，组就没了）。这是故意的：分组是个标签，不是个容器，
+    用户不需要先建组再往里放书。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        rows = session.execute(
+            select(ReaderShelfBook.group, func.count())
+            .where(ReaderShelfBook.user_id == int(user_id))
+            .group_by(ReaderShelfBook.group)
+        ).all()
+    return sorted(
+        ({"name": row[0] or "", "count": int(row[1])} for row in rows),
+        key=lambda item: (item["name"] == "", item["name"]),
+    )
+
+
+def set_shelf_group(
+    book_keys: List[str],
+    group: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> int:
+    """把若干本书移到某个分组，返回真正改到的行数。
+
+    一条 UPDATE 带 `user_id` 条件：界面上的操作本来就是多选后一起移动，而逐本
+    改会在中途失败时留下一半搬完的状态。别人书架上的 `book_key` 不在 WHERE 命中
+    范围内，所以多传几个也只是没改到，碰不到别人的数据。
+    """
+    keys = [key for key in book_keys if key]
+    if not keys:
+        return 0
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        result = session.execute(
+            update(ReaderShelfBook)
+            .where(
+                ReaderShelfBook.user_id == int(user_id),
+                ReaderShelfBook.book_key.in_(keys),
+            )
+            .values(group=group or "", updated_at=_PRESERVE_UPDATED_AT)
+        )
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def rename_shelf_group(
+    old: str,
+    new: str,
+    user_id: int = LOCAL_USER_ID,
+    database_url: Optional[str] = None,
+) -> int:
+    """改名，返回搬动的行数。`new=""` 就是解散这个分组（书留着，只是回到未分组）。
+
+    没有「删除分组」这个操作 —— 删掉一个标签不该删掉书。
+    """
+    if not old:
+        #  "" 不是一个分组名，是「未分组」这个状态。给它改名等于把所有没分组的书
+        #  一起塞进某个组，那不是用户点「重命名」时想要的。
+        return 0
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        result = session.execute(
+            update(ReaderShelfBook)
+            .where(
+                ReaderShelfBook.user_id == int(user_id),
+                ReaderShelfBook.group == old,
+            )
+            .values(group=new or "", updated_at=_PRESERVE_UPDATED_AT)
+        )
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def record_update_check(
+    book_key: str,
+    user_id: int = LOCAL_USER_ID,
+    chapter_count: int = 0,
+    last_chapter: str = "",
+    error: str = "",
+    database_url: Optional[str] = None,
+) -> bool:
+    """记一次「检查更新」的结果。返回书是否还在架上。
+
+    失败时**保留**上一次数到的章节数：清零会让未读角标凭空消失，看起来像「更新
+    没了」而不是「这次没查到」。所以只写 `last_check_error`，界面自己决定要不要
+    提示。
+    """
+    values: Dict[str, Any] = {
+        "last_checked_at": utcnow(),
+        "last_check_error": error or None,
+        "updated_at": _PRESERVE_UPDATED_AT,
+    }
+    if not error:
+        values["chapter_count"] = max(0, int(chapter_count))
+        if last_chapter:
+            values["last_chapter"] = last_chapter
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        result = session.execute(
+            update(ReaderShelfBook)
+            .where(
+                ReaderShelfBook.user_id == int(user_id),
+                ReaderShelfBook.book_key == book_key,
+            )
+            .values(**values)
+        )
+        session.commit()
+        return bool(result.rowcount)
 
 
 def get_shelf_book(

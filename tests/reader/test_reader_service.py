@@ -6,7 +6,7 @@ import pytest
 
 from funread.legado.engine import Chapter, StaticFetcher
 from funread.legado.engine.errors import JsNotSupportedError
-from funread.legado.reader import ReaderService, SourceRegistry, storage
+from funread.legado.reader import ReaderService, SourceRegistry, storage, unread_chapters
 
 
 def _source(host, name):
@@ -656,3 +656,200 @@ def test_scan_counts_explore_capable_sources(make_service):
 
     assert stats["has_explore"] == 1
     assert stats["enabled"] == 2
+
+
+# ------------------------------------------------------------------ 检查更新
+
+
+def _toc_html(count):
+    links = "".join(f'<a href="/c/{i}">第{i}章</a>' for i in range(1, count + 1))
+    return f'<html><body><div id="l">{links}</div></body></html>'
+
+
+def test_unread_is_zero_before_the_first_check():
+    """`chapter_count = 0` 是「还没查过」，不是「这本书没有章节」。"""
+    assert unread_chapters(0, None) == 0
+
+
+def test_an_unread_book_counts_every_chapter():
+    assert unread_chapters(1200, None) == 1200
+
+
+def test_unread_counts_from_the_chapter_being_read():
+    """`chapter_index` 是 0 基的：读到第 0 章意味着后面还有 total - 1 章。"""
+
+    class _P:
+        chapter_index = 0
+
+    assert unread_chapters(1200, _P()) == 1199
+
+
+def test_a_fully_read_book_has_no_badge():
+    class _P:
+        chapter_index = 1199
+
+    assert unread_chapters(1200, _P()) == 0
+
+
+def test_a_progress_past_the_end_does_not_go_negative():
+    """换源之后进度可能指向一个比新源目录更靠后的序号。"""
+
+    class _P:
+        chapter_index = 5000
+
+    assert unread_chapters(1200, _P()) == 0
+
+
+def test_checking_updates_records_the_chapter_count(make_service):
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    book_key = service.add_to_shelf(
+        {"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+
+    stats = service.check_updates(interval=0)
+
+    assert stats == {"total": 1, "checked": 1, "updated": 1, "failed": 0}
+    book = storage.get_shelf_book(book_key, database_url=service.database_url)
+    assert book.chapter_count == 3
+    assert book.last_chapter == "第3章"
+
+
+def test_a_shelf_with_no_new_chapters_reports_no_update(make_service):
+    """第二轮检查章节数没变 —— `updated` 必须是 0，否则角标天天亮着。"""
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    service.add_to_shelf({"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"})
+    service.check_updates(interval=0)
+
+    assert service.check_updates(interval=0)["updated"] == 0
+
+
+def test_the_unread_badge_appears_when_the_book_grows(make_service):
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    book_key = service.add_to_shelf(
+        {"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+    service.check_updates(interval=0)
+    service.save_progress(book_key, chapter_index=2)
+    assert service.shelf()[0]["unread"] == 0
+
+    service.fetcher.add("https://a.example.com/b/0", _toc_html(5))
+    service.check_updates(interval=0)
+
+    assert service.shelf()[0]["unread"] == 2
+
+
+def test_one_dead_source_does_not_stop_the_round(make_service):
+    """书架上十本书来自十个源，一个挂了不该让另外九本也查不到。"""
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源"), 2: _source("b.example.com", "乙源")},
+    )
+    alive = service.add_to_shelf(
+        {"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+    dead = service.add_to_shelf(
+        {"name": "仙逆", "url_id": 2, "book_url": "https://b.example.com/b/9"}
+    )
+
+    stats = service.check_updates(interval=0)
+
+    assert stats["total"] == 2
+    assert stats["checked"] == 1
+    assert stats["failed"] == 1
+    assert storage.get_shelf_book(alive, database_url=service.database_url).chapter_count == 3
+    assert storage.get_shelf_book(dead, database_url=service.database_url).last_check_error
+
+
+def test_a_book_with_no_remembered_source_is_an_error_not_a_zero(make_service):
+    """记成 0 章会被当成「这本书没有章节」，未读角标跟着清零。"""
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    book_key = service.add_to_shelf({"name": "手动加的书"})
+    storage.record_update_check(book_key, chapter_count=100, database_url=service.database_url)
+
+    service.check_updates(interval=0)
+
+    book = storage.get_shelf_book(book_key, database_url=service.database_url)
+    assert book.chapter_count == 100
+    assert "没有记住来源" in book.last_check_error
+
+
+def test_checking_a_subset_leaves_the_rest_alone(make_service):
+    """界面上的「单本检查更新」不该顺手把整个书架都打一遍。"""
+    service = make_service(
+        pages={
+            "https://a.example.com/b/0": _toc_html(3),
+            "https://a.example.com/b/1": _toc_html(7),
+        },
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    first = service.add_to_shelf(
+        {"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    )
+    second = service.add_to_shelf(
+        {"name": "仙逆", "url_id": 1, "book_url": "https://a.example.com/b/1"}
+    )
+
+    stats = service.check_updates(book_keys=[second], interval=0)
+
+    assert stats["total"] == 1
+    assert storage.get_shelf_book(first, database_url=service.database_url).last_checked_at is None
+    assert storage.get_shelf_book(second, database_url=service.database_url).chapter_count == 7
+
+
+def test_checking_updates_is_scoped_to_one_user(make_service):
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    payload = {"name": "剑来", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+    service.add_to_shelf(payload, user_id=1)
+    theirs = service.add_to_shelf(payload, user_id=2)
+
+    assert service.check_updates(user_id=1, interval=0)["total"] == 1
+    assert (
+        storage.get_shelf_book(theirs, user_id=2, database_url=service.database_url).chapter_count
+        == 0
+    )
+
+
+def test_progress_is_reported_as_the_round_goes(make_service):
+    """全量检查要几分钟，界面得能画进度条而不是一直转圈。"""
+    service = make_service(
+        pages={"https://a.example.com/b/0": _toc_html(3)},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+    for index in range(3):
+        service.add_to_shelf(
+            {"name": f"书{index}", "url_id": 1, "book_url": "https://a.example.com/b/0"}
+        )
+    seen = []
+
+    service.check_updates(interval=0, on_progress=seen.append)
+
+    assert [item["checked"] for item in seen] == [1, 2, 3]
+    #  快照而不是同一个 dict 的引用 —— 否则调用方存下来的全是最终值
+    assert seen[0]["checked"] == 1
+
+
+def test_shelf_groups_round_trip_through_the_service(make_service):
+    service = make_service(pages={}, sources={1: _source("a.example.com", "甲源")})
+    first = service.add_to_shelf({"name": "剑来"})
+    service.add_to_shelf({"name": "活着"})
+
+    assert service.set_shelf_group([first], "玄幻") == 1
+    assert service.shelf_groups() == [
+        {"name": "玄幻", "count": 1},
+        {"name": "", "count": 1},
+    ]
+    assert [item["group"] for item in service.shelf(group="玄幻")] == ["玄幻"]
+    assert service.rename_shelf_group("玄幻", "东方玄幻") == 1
+    assert [item["name"] for item in service.shelf(group="东方玄幻")] == ["剑来"]

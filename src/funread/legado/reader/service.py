@@ -71,10 +71,32 @@ DETAIL_TIMEOUT = (10, 20)
 #  批量下载的节流间隔（秒）。串行 + 停顿，别把人家站点打挂。
 DOWNLOAD_INTERVAL = 0.5
 
+#  批量检查更新的节流间隔（秒）。比下载慢一倍 —— 下载是连着打同一个源，而检查
+#  更新是挨个打不同的源，节奏快了更像爬虫。
+CHECK_INTERVAL = 1.0
+
 
 def _default_fetcher(timeout=DETAIL_TIMEOUT) -> RequestsFetcher:
     """默认抓取器。每次都是新实例 —— cookie jar 必须按源隔离。"""
     return RequestsFetcher(timeout=timeout, max_retry=1)
+
+
+def unread_chapters(chapter_count: int, progress: Optional[Any]) -> int:
+    """还剩几章没读。书架角标和「有新章节」标记都用这一个数。
+
+    不单独存一列 `unread`：它是 `chapter_count` 和阅读进度的差，存了就要在两边
+    任意一个变化时同步，而漏同步的表现是角标永远停在某个数字上。
+
+    `chapter_count = 0` 意味着**还没查过更新**，不是「这本书没有章节」，所以返回
+    0 而不是一个凭空的数。没有进度的书整本都没读，所以未读 = 章节总数。
+    """
+    total = max(0, int(chapter_count or 0))
+    if not total:
+        return 0
+    if progress is None:
+        return total
+    #  `chapter_index` 是 0 基的，读到第 0 章意味着后面还有 total - 1 章
+    return max(0, total - 1 - int(progress.chapter_index or 0))
 
 
 class AggregatedBook:
@@ -530,10 +552,19 @@ class ReaderService:
 
     # ------------------------------------------------------------------ 书架
 
-    def shelf(self, user_id: int = storage.LOCAL_USER_ID) -> List[Dict[str, Any]]:
-        """某个人的书架，带上每本书的阅读进度 —— 前端要在封面上画进度条。"""
+    def shelf(
+        self,
+        user_id: int = storage.LOCAL_USER_ID,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """某个人的书架，带上每本书的阅读进度 —— 前端要在封面上画进度条。
+
+        `group=None` 是整个书架，`group=""` 是只看未分组的那些。
+        """
         items = []
-        for book in storage.list_shelf(user_id=user_id, database_url=self.database_url):
+        for book in storage.list_shelf(
+            user_id=user_id, group=group, database_url=self.database_url
+        ):
             progress = storage.get_progress(
                 book.book_key, user_id=user_id, database_url=self.database_url
             )
@@ -548,6 +579,13 @@ class ReaderService:
                     "book_url": book.book_url,
                     "toc_url": book.toc_url,
                     "last_chapter": book.last_chapter,
+                    "group": book.group,
+                    "chapter_count": book.chapter_count,
+                    "unread": unread_chapters(book.chapter_count, progress),
+                    "last_checked_at": (
+                        book.last_checked_at.isoformat() if book.last_checked_at else ""
+                    ),
+                    "last_check_error": book.last_check_error or "",
                     "updated_at": book.updated_at.isoformat() if book.updated_at else "",
                     "progress": (
                         {
@@ -561,6 +599,95 @@ class ReaderService:
                 }
             )
         return items
+
+    def shelf_groups(self, user_id: int = storage.LOCAL_USER_ID) -> List[Dict[str, Any]]:
+        return storage.list_shelf_groups(user_id=user_id, database_url=self.database_url)
+
+    def set_shelf_group(
+        self,
+        book_keys: List[str],
+        group: str,
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> int:
+        return storage.set_shelf_group(
+            book_keys, group, user_id=user_id, database_url=self.database_url
+        )
+
+    def rename_shelf_group(
+        self,
+        old: str,
+        new: str,
+        user_id: int = storage.LOCAL_USER_ID,
+    ) -> int:
+        return storage.rename_shelf_group(old, new, user_id=user_id, database_url=self.database_url)
+
+    # ------------------------------------------------------------------ 检查更新
+
+    def check_updates(
+        self,
+        user_id: int = storage.LOCAL_USER_ID,
+        book_keys: Optional[List[str]] = None,
+        interval: float = CHECK_INTERVAL,
+        on_progress: Optional[Callable[[Dict[str, int]], None]] = None,
+    ) -> Dict[str, int]:
+        """逐本重取目录，记下章节总数 —— 未读角标就是从这里来的。
+
+        串行 + 停顿，和 `download_chapters` 同一个理由：这是后台任务，没人在等它，
+        而把一个小站打挂的代价是整个源以后都用不了。一本书要两个请求（详情页 +
+        目录页），所以一个 50 本的书架大约 100 次请求。
+
+        单本失败只记在那一行的 `last_check_error` 上，不中断整轮 —— 书架上十本书
+        来自十个源，其中一个挂了不该让另外九本也查不到。
+
+        `book_keys=None` 查整个书架；给了就只查这几本（界面上的「单本检查更新」）。
+        """
+        books = storage.list_shelf(user_id=user_id, database_url=self.database_url)
+        if book_keys is not None:
+            wanted = {key for key in book_keys if key}
+            books = [book for book in books if book.book_key in wanted]
+
+        stats = {"total": len(books), "checked": 0, "updated": 0, "failed": 0}
+        for position, book in enumerate(books):
+            try:
+                count, last_chapter = self._count_chapters(book)
+            except Exception as exc:
+                stats["failed"] += 1
+                storage.record_update_check(
+                    book.book_key,
+                    user_id=user_id,
+                    error=str(exc)[:500],
+                    database_url=self.database_url,
+                )
+                logger.debug(f"Update check failed for {book.name}: {exc}")
+            else:
+                stats["checked"] += 1
+                if count > book.chapter_count:
+                    stats["updated"] += 1
+                storage.record_update_check(
+                    book.book_key,
+                    user_id=user_id,
+                    chapter_count=count,
+                    last_chapter=last_chapter,
+                    database_url=self.database_url,
+                )
+            if on_progress is not None:
+                on_progress(dict(stats))
+            #  最后一本查完就不用再等了
+            if interval > 0 and position + 1 < len(books):
+                time.sleep(interval)
+        return stats
+
+    def _count_chapters(self, book: storage.ReaderShelfBook) -> Tuple[int, str]:
+        """数一下这本书现在有多少章，顺便带回最新章节名。
+
+        书架上没有 `url_id`/`book_url` 的条目（手动加的、或者源已经删了）直接报错
+        而不是返回 0 —— 返回 0 会被记成「这本书没有章节」，未读角标跟着清零。
+        """
+        if not book.url_id or not book.book_url:
+            raise LookupError("这本书没有记住来源，先换一次源")
+        info = self.book_info(book.url_id, book.book_url, name=book.name, author=book.author)
+        chapters = self.toc(book.url_id, info)
+        return len(chapters), chapters[-1].name if chapters else ""
 
     def add_to_shelf(
         self,
