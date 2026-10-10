@@ -1,14 +1,22 @@
-"""阅读端的持久化：账号、源偏好、书架、阅读进度、章节缓存。
+"""阅读端的持久化：源偏好、书架、阅读进度、章节缓存、订阅。
 
 和 `manage/source/storage.py` 同一套路子（SQLAlchemy declarative + `create_all`
 + 手写迁移，不引 Alembic），但表是独立的一组，engine / session 工厂复用那边的缓存
 —— 同一个库开两个连接池没有意义。
 
+## 账号表不在这里
+
+`reader_user` / `reader_invite_code` 以及口令哈希、登录、邀请码全都搬到
+`funread_api.accounts`，建在 funauth 的 `UserMixin` / `InviteCodeMixin` 上。原因是
+funauth 要求 **SQLAlchemy async + Python 3.12**，而本包的下限是 3.10、整层是同步的
+—— 把 funauth 拉成 funread 的硬依赖等于替所有只用采集功能的人抬高 Python 下限。
+这一层只认 `user_id` 这个整数，不关心账号是谁发的。
+
 ## 数据按人隔离
 
-书架、进度（以及订阅源那两张表）都带 `user_id`，查询一律进 SQL 的 WHERE 而不是
-在应用层过滤 —— 漏一处就是跨用户数据泄露。章节正文缓存 `reader_chapter_cache`
-**不带** `user_id`：它是正文缓存而不是个人数据，按人隔离只会让同一章正文存 N 份。
+书架、进度、订阅那几张表都带 `user_id`，查询一律进 SQL 的 WHERE 而不是在应用层
+过滤 —— 漏一处就是跨用户数据泄露。章节正文缓存 `reader_chapter_cache` **不带**
+`user_id`：它是正文缓存而不是个人数据，按人隔离只会让同一章正文存 N 份。
 
 `user_id = 0`（`LOCAL_USER_ID`）是「还没有任何账号」时的隐式单人身份，保证新克隆
 与 CI 不配账号也能直接用。第一个账号注册成功时会把 user 0 的数据认领过去
@@ -16,9 +24,6 @@
 """
 
 import hashlib
-import hmac
-import os
-import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -45,20 +50,6 @@ logger = getLogger("funread")
 #: 还没有任何注册账号时使用的隐式身份。见模块 docstring。
 LOCAL_USER_ID = 0
 
-#: 用户名规则：字母数字加下划线短横点，3-32 位。限死是为了让它能安全地出现在
-#: 日志、URL 和错误文案里，不必再逐处转义。
-USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$")
-
-MIN_PASSWORD_LENGTH = 8
-
-#: scrypt 参数。n=2**14 在本机约 60ms —— 对登录够快，对离线爆破够慢。
-#: 存进哈希串里，所以以后调大不会让旧口令失效。
-_SCRYPT_N = 2**14
-_SCRYPT_R = 8
-_SCRYPT_P = 1
-_SCRYPT_SALT_BYTES = 16
-_SCRYPT_KEY_BYTES = 32
-
 
 class ReaderBase(DeclarativeBase):
     """阅读端表的 declarative base。
@@ -66,25 +57,6 @@ class ReaderBase(DeclarativeBase):
     和采集侧的 `Base` 分开：`init_reader_db()` 不该顺手把采集侧的表也建出来，
     反过来也一样。
     """
-
-
-class ReaderUser(ReaderBase):
-    """一个阅读端账号。
-
-    和 B 端 `/admin` 的单口令完全分开 —— 管理端不该和读者账号共用凭据。
-    口令只存 scrypt 哈希，明文不落库也不进日志。
-    """
-
-    __tablename__ = "reader_user"
-
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, onupdate=utcnow, nullable=False
-    )
 
 
 class ReaderSourcePref(ReaderBase):
@@ -361,144 +333,35 @@ def init_reader_db(database_url: Optional[str] = None) -> None:
     _INITIALIZED_DATABASES.add(key)
 
 
-# ------------------------------------------------------------------ 口令哈希
+# ------------------------------------------------------------------ 认领无主数据
 
-
-def hash_password(password: str) -> str:
-    """`scrypt$n$r$p$salt_hex$key_hex`。
-
-    用 stdlib 的 `hashlib.scrypt`，不引 passlib/bcrypt —— funread 的依赖面要维持
-    现状，而 scrypt 本身就是为抗硬件爆破设计的。参数编进字符串，以后调大不会让
-    已有口令失效。
-    """
-    if not password:
-        raise ValueError("password is required")
-    salt = os.urandom(_SCRYPT_SALT_BYTES)
-    key = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=_SCRYPT_N,
-        r=_SCRYPT_R,
-        p=_SCRYPT_P,
-        dklen=_SCRYPT_KEY_BYTES,
-        maxmem=64 * 1024 * 1024,
-    )
-    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${key.hex()}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    """永不抛：哈希串格式坏了就是验证失败，不是 500。"""
-    try:
-        scheme, n, r, p, salt_hex, key_hex = (stored or "").split("$")
-        if scheme != "scrypt":
-            return False
-        candidate = hashlib.scrypt(
-            (password or "").encode("utf-8"),
-            salt=bytes.fromhex(salt_hex),
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            dklen=len(bytes.fromhex(key_hex)),
-            maxmem=64 * 1024 * 1024,
-        )
-    except (ValueError, TypeError, MemoryError):
-        return False
-    #  compare_digest，不是 ==：普通比较会按时间泄露哈希
-    return hmac.compare_digest(candidate.hex(), key_hex)
-
-
-# ------------------------------------------------------------------ 账号
-
-
-def count_users(database_url: Optional[str] = None) -> int:
-    session_factory = get_session_factory(database_url)
-    with session_factory() as session:
-        return int(session.execute(select(func.count()).select_from(ReaderUser)).scalar_one())
-
-
-def get_user_by_name(username: str, database_url: Optional[str] = None) -> Optional[ReaderUser]:
-    session_factory = get_session_factory(database_url)
-    with session_factory() as session:
-        stmt = select(ReaderUser).where(ReaderUser.username == (username or "").strip())
-        return session.execute(stmt).scalars().first()
-
-
-def get_user(user_id: int, database_url: Optional[str] = None) -> Optional[ReaderUser]:
-    session_factory = get_session_factory(database_url)
-    with session_factory() as session:
-        return session.get(ReaderUser, int(user_id))
+#: 认领会搬动的四张表。账号表不在其中 —— 见模块 docstring 的「账号表不在这里」。
+#: 订阅和文章状态必须一起搬：文章状态的主键里带 `sub_id`，只搬订阅会让已读标记
+#: 留在 user 0 名下，表现为「订阅还在，但所有文章又变回未读」。
+_CLAIMABLE_MODELS = (
+    ReaderShelfBook,
+    ReaderProgress,
+    ReaderRssSubscription,
+    ReaderRssArticleState,
+)
 
 
 def claim_local_data(user_id: int, database_url: Optional[str] = None) -> Dict[str, int]:
     """把 `user_id = 0` 的存量数据认领给某个账号。
 
-    只在第一个账号注册时调用：那之前的书架与进度是「还没有账号时」攒下来的，
+    只在第一个账号注册时调用：那之前的书架、进度与订阅是「还没有账号时」攒下来的，
     理应归第一个人。第二个账号注册时已经没有 user 0 的行了，所以这个函数返回全零。
     """
     moved: Dict[str, int] = {}
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        for model in (ReaderShelfBook, ReaderProgress):
+        for model in _CLAIMABLE_MODELS:
             result = session.execute(
                 update(model).where(model.user_id == LOCAL_USER_ID).values(user_id=int(user_id))
             )
             moved[model.__tablename__] = int(result.rowcount or 0)
         session.commit()
     return moved
-
-
-def create_user(
-    username: str,
-    password: str,
-    database_url: Optional[str] = None,
-) -> ReaderUser:
-    """建账号。用户名已存在抛 `ValueError`，调用方把它翻成 409。
-
-    第一个账号会顺带认领 user 0 的存量数据 —— 它本来就是同一个人在没有账号时读的。
-    """
-    username = (username or "").strip()
-    if not USERNAME_PATTERN.match(username):
-        raise ValueError("用户名需为 3-32 位字母、数字、下划线、短横线或点，且以字母数字开头")
-    if len(password or "") < MIN_PASSWORD_LENGTH:
-        raise ValueError(f"口令至少 {MIN_PASSWORD_LENGTH} 位")
-
-    session_factory = get_session_factory(database_url)
-    is_first = count_users(database_url) == 0
-    with session_factory() as session:
-        if session.execute(
-            select(ReaderUser.user_id).where(ReaderUser.username == username)
-        ).first():
-            raise ValueError("用户名已被占用")
-        row = ReaderUser(username=username, password_hash=hash_password(password))
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        created = row
-
-    if is_first:
-        moved = claim_local_data(created.user_id, database_url=database_url)
-        if any(moved.values()):
-            logger.info(f"首个账号 {username} 认领了无主数据：{moved}")
-    return created
-
-
-def authenticate(
-    username: str,
-    password: str,
-    database_url: Optional[str] = None,
-) -> Optional[ReaderUser]:
-    """校验口令。用户不存在与口令不对返回同一个 `None` —— 不泄露用户名是否存在。"""
-    user = get_user_by_name(username, database_url=database_url)
-    if user is None:
-        #  走一遍同等开销的哈希，避免「用户不存在」比「口令错」快得多，
-        #  那本身就是一个可枚举用户名的信道
-        verify_password(password or "", hash_password("timing-equaliser"))
-        return None
-    if user.disabled:
-        return None
-    if not verify_password(password or "", user.password_hash):
-        return None
-    return user
 
 
 def get_session_factory(database_url: Optional[str] = None) -> sessionmaker:
@@ -1065,7 +928,6 @@ def list_favorites(
 
 __all__ = [
     "LOCAL_USER_ID",
-    "MIN_PASSWORD_LENGTH",
     "ReaderBase",
     "ReaderChapterCache",
     "ReaderProgress",
@@ -1073,26 +935,18 @@ __all__ = [
     "ReaderRssSubscription",
     "ReaderShelfBook",
     "ReaderSourcePref",
-    "ReaderUser",
-    "USERNAME_PATTERN",
-    "authenticate",
     "claim_local_data",
     "clear_chapter_cache",
     "compute_article_key",
     "compute_book_key",
     "compute_sub_id",
     "count_read",
-    "count_users",
-    "create_user",
     "get_article_states",
     "get_cached_chapter",
     "get_progress",
     "get_session_factory",
     "get_shelf_book",
     "get_subscription",
-    "get_user",
-    "get_user_by_name",
-    "hash_password",
     "init_reader_db",
     "list_cached_chapter_indexes",
     "list_favorites",
@@ -1110,5 +964,4 @@ __all__ = [
     "upsert_shelf_book",
     "upsert_source_prefs",
     "upsert_subscription",
-    "verify_password",
 ]

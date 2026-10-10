@@ -1,4 +1,9 @@
-"""阅读端账号、口令哈希、数据按人隔离，以及给老表补 user_id 的迁移。"""
+"""数据按人隔离、认领无主数据，以及给老表补 `user_id` 的迁移。
+
+账号本身（口令哈希、注册、登录、邀请码）不在这一层 —— 搬到 `funread-api` 的
+`accounts` 模块，建在 funauth 上了，对应的测试也跟着搬了过去。这里只认
+`user_id` 这个整数，不关心它是谁发的，所以测的是「两个 id 的数据互不可见」。
+"""
 
 import pytest
 from sqlalchemy import text
@@ -7,24 +12,21 @@ from funread.legado.reader import storage
 from funread.legado.reader.storage import (
     LOCAL_USER_ID,
     ReaderChapterCache,
-    authenticate,
     claim_local_data,
-    count_users,
-    create_user,
+    get_article_states,
     get_progress,
     get_session_factory,
     get_shelf_book,
-    get_user,
-    get_user_by_name,
-    hash_password,
     init_reader_db,
     list_cached_chapter_indexes,
     list_shelf,
+    list_subscriptions,
     remove_shelf_book,
     save_cached_chapter,
     save_progress,
+    set_article_state,
     upsert_shelf_book,
-    verify_password,
+    upsert_subscription,
 )
 
 
@@ -43,146 +45,60 @@ def db(tmp_path, monkeypatch):
     return url
 
 
-# ---------------------------------------------------------------- 口令哈希
-
-
-def test_hash_and_verify_roundtrip():
-    stored = hash_password("correct horse battery")
-    assert verify_password("correct horse battery", stored)
-    assert not verify_password("wrong", stored)
-
-
-def test_hash_is_salted_so_two_identical_passwords_differ():
-    assert hash_password("same-password") != hash_password("same-password")
-
-
-def test_hash_records_its_parameters():
-    scheme, n, r, p, salt, key = hash_password("x" * 10).split("$")
-    assert scheme == "scrypt"
-    assert (int(n), int(r), int(p)) == (2**14, 8, 1)
-    assert len(bytes.fromhex(salt)) == 16
-    assert len(bytes.fromhex(key)) == 32
-
-
-@pytest.mark.parametrize(
-    "stored",
-    ["", "not-a-hash", "scrypt$1$2$3", "bcrypt$1$1$1$aa$bb", "scrypt$x$8$1$aa$bb"],
-)
-def test_verify_never_raises_on_a_broken_hash(stored):
-    """哈希串坏了是验证失败，不是 500。"""
-    assert verify_password("anything", stored) is False
-
-
-def test_empty_password_is_refused_at_hash_time():
-    with pytest.raises(ValueError):
-        hash_password("")
-
-
-# ---------------------------------------------------------------- 建账号
-
-
-def test_create_and_fetch_user(db):
-    user = create_user("alice", "password123", database_url=db)
-    assert user.user_id > 0
-    assert user.username == "alice"
-    assert user.password_hash.startswith("scrypt$")
-    assert get_user_by_name("alice", database_url=db).user_id == user.user_id
-    assert get_user(user.user_id, database_url=db).username == "alice"
-    assert count_users(database_url=db) == 1
-
-
-def test_plaintext_password_is_never_stored(db):
-    create_user("alice", "password123", database_url=db)
-    session_factory = get_session_factory(db)
-    with session_factory() as session:
-        rows = session.execute(text("SELECT * FROM reader_user")).all()
-    assert not any("password123" in str(value) for row in rows for value in row)
-
-
-def test_duplicate_username_is_rejected(db):
-    create_user("alice", "password123", database_url=db)
-    with pytest.raises(ValueError, match="已被占用"):
-        create_user("alice", "another-password", database_url=db)
-    assert count_users(database_url=db) == 1
-
-
-@pytest.mark.parametrize("username", ["ab", "_leading", "a" * 33, "has space", "", "用户名"])
-def test_invalid_usernames_are_rejected(db, username):
-    with pytest.raises(ValueError, match="用户名"):
-        create_user(username, "password123", database_url=db)
-
-
-def test_short_password_is_rejected(db):
-    with pytest.raises(ValueError, match="口令至少"):
-        create_user("alice", "short", database_url=db)
-
-
-def test_username_is_trimmed(db):
-    user = create_user("  alice  ", "password123", database_url=db)
-    assert user.username == "alice"
-
-
-# ---------------------------------------------------------------- 登录
-
-
-def test_authenticate_accepts_the_right_password(db):
-    created = create_user("alice", "password123", database_url=db)
-    assert authenticate("alice", "password123", database_url=db).user_id == created.user_id
-
-
-def test_authenticate_rejects_the_wrong_password(db):
-    create_user("alice", "password123", database_url=db)
-    assert authenticate("alice", "password124", database_url=db) is None
-
-
-def test_authenticate_on_an_unknown_user_is_indistinguishable_from_a_bad_password(db):
-    create_user("alice", "password123", database_url=db)
-    assert authenticate("nobody", "password123", database_url=db) is None
-    assert authenticate("alice", "nope", database_url=db) is None
-
-
-def test_disabled_user_cannot_authenticate(db):
-    user = create_user("alice", "password123", database_url=db)
-    session_factory = get_session_factory(db)
-    with session_factory() as session:
-        session.get(storage.ReaderUser, user.user_id).disabled = True
-        session.commit()
-    assert authenticate("alice", "password123", database_url=db) is None
-
-
 # ---------------------------------------------------------------- 认领无主数据
 
 
-def test_first_user_claims_data_left_by_the_accountless_era(db):
+def test_claim_hands_over_everything_left_by_the_accountless_era(db):
     upsert_shelf_book({"name": "剑来", "author": "烽火戏诸侯"}, database_url=db)
-    save_progress(storage.compute_book_key("剑来", "烽火戏诸侯"), chapter_index=7, database_url=db)
-    assert len(list_shelf(LOCAL_USER_ID, database_url=db)) == 1
+    book_key = storage.compute_book_key("剑来", "烽火戏诸侯")
+    save_progress(book_key, chapter_index=7, database_url=db)
+    sub_id = upsert_subscription(
+        {"kind": "feed", "feed_url": "https://x/atom.xml", "title": "X"}, database_url=db
+    )
+    set_article_state(sub_id, "a1", read=True, database_url=db)
 
-    alice = create_user("alice", "password123", database_url=db)
+    moved = claim_local_data(7, database_url=db)
 
+    assert moved == {
+        "reader_shelf": 1,
+        "reader_progress": 1,
+        "reader_rss_subscription": 1,
+        "reader_rss_article_state": 1,
+    }
     assert list_shelf(LOCAL_USER_ID, database_url=db) == []
-    mine = list_shelf(alice.user_id, database_url=db)
-    assert [book.name for book in mine] == ["剑来"]
-    assert get_progress(mine[0].book_key, alice.user_id, database_url=db).chapter_index == 7
+    assert [book.name for book in list_shelf(7, database_url=db)] == ["剑来"]
+    assert get_progress(book_key, 7, database_url=db).chapter_index == 7
+    assert [sub.sub_id for sub in list_subscriptions(7, database_url=db)] == [sub_id]
 
 
-def test_the_second_user_claims_nothing(db):
-    upsert_shelf_book({"name": "剑来"}, database_url=db)
-    alice = create_user("alice", "password123", database_url=db)
-    bob = create_user("bob", "password123", database_url=db)
+def test_claim_moves_article_state_with_its_subscription(db):
+    """只搬订阅会让已读标记留在 user 0 名下 —— 表现成「订阅还在，文章全变未读」。"""
+    sub_id = upsert_subscription(
+        {"kind": "feed", "feed_url": "https://x/atom.xml"}, database_url=db
+    )
+    set_article_state(sub_id, "a1", read=True, database_url=db)
 
-    assert len(list_shelf(alice.user_id, database_url=db)) == 1
-    assert list_shelf(bob.user_id, database_url=db) == []
+    claim_local_data(7, database_url=db)
+
+    states = get_article_states(sub_id, ["a1"], user_id=7, database_url=db)
+    assert states["a1"].read is True
+    assert get_article_states(sub_id, ["a1"], user_id=LOCAL_USER_ID, database_url=db) == {}
 
 
 def test_claim_is_idempotent(db):
     upsert_shelf_book({"name": "剑来"}, database_url=db)
-    alice = create_user("alice", "password123", database_url=db)
-    assert claim_local_data(alice.user_id, database_url=db) == {
+    claim_local_data(7, database_url=db)
+
+    #  第二次已经没有 user 0 的行了，所以一行都搬不走 —— 而且不会把第一个人的
+    #  数据再抢给第二个人。
+    assert claim_local_data(8, database_url=db) == {
         "reader_shelf": 0,
         "reader_progress": 0,
+        "reader_rss_subscription": 0,
+        "reader_rss_article_state": 0,
     }
-    assert len(list_shelf(alice.user_id, database_url=db)) == 1
+    assert len(list_shelf(7, database_url=db)) == 1
+    assert list_shelf(8, database_url=db) == []
 
 
 # ---------------------------------------------------------------- 按人隔离
@@ -217,6 +133,26 @@ def test_progress_is_per_user(db):
 
     assert get_progress(key, 1, database_url=db).chapter_index == 10
     assert get_progress(key, 2, database_url=db).chapter_index == 99
+
+
+def test_subscriptions_do_not_leak_between_users(db):
+    upsert_subscription({"kind": "feed", "feed_url": "https://a/f"}, user_id=1, database_url=db)
+    upsert_subscription({"kind": "feed", "feed_url": "https://b/f"}, user_id=2, database_url=db)
+
+    assert [s.feed_url for s in list_subscriptions(1, database_url=db)] == ["https://a/f"]
+    assert [s.feed_url for s in list_subscriptions(2, database_url=db)] == ["https://b/f"]
+
+
+def test_read_marks_are_per_user(db):
+    """同一个源、同一篇文章，一个人读过不代表另一个人读过。"""
+    sub_id = upsert_subscription(
+        {"kind": "feed", "feed_url": "https://a/f"}, user_id=1, database_url=db
+    )
+    upsert_subscription({"kind": "feed", "feed_url": "https://a/f"}, user_id=2, database_url=db)
+    set_article_state(sub_id, "a1", user_id=1, read=True, database_url=db)
+
+    assert get_article_states(sub_id, ["a1"], user_id=1, database_url=db)["a1"].read is True
+    assert get_article_states(sub_id, ["a1"], user_id=2, database_url=db) == {}
 
 
 def test_payload_cannot_smuggle_a_user_id(db):
@@ -360,8 +296,8 @@ def test_migration_is_a_no_op_on_an_already_migrated_database(tmp_path, monkeypa
     assert [b.name for b in list_shelf(3, database_url=url)] == ["剑来"]
 
 
-def test_migration_then_first_registration_hands_the_data_over(tmp_path, monkeypatch):
-    """迁移 + 认领合起来才是完整的升级路径。"""
+def test_migration_then_claim_is_the_whole_upgrade_path(tmp_path, monkeypatch):
+    """迁移把存量行归给 user 0，认领再把它交给第一个注册的人。两步合起来才完整。"""
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'upgrade.db'}"
     monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
@@ -370,10 +306,10 @@ def test_migration_then_first_registration_hands_the_data_over(tmp_path, monkeyp
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     init_reader_db(url)
 
-    alice = create_user("alice", "password123", database_url=url)
+    claim_local_data(1, database_url=url)
 
-    assert [b.name for b in list_shelf(alice.user_id, database_url=url)] == ["剑来"]
-    assert get_progress("k1", alice.user_id, database_url=url).chapter_index == 42
+    assert [b.name for b in list_shelf(1, database_url=url)] == ["剑来"]
+    assert get_progress("k1", 1, database_url=url).chapter_index == 42
 
 
 def test_chapter_cache_has_no_user_column(db):
