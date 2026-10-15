@@ -134,10 +134,69 @@ def test_database_url_uses_secret(no_overrides, monkeypatch):
     assert config.resolve_database_url() == "sqlite:///secret.db"
 
 
-def test_cache_root_uses_secret(no_overrides, monkeypatch):
-    monkeypatch.setattr(funsecret, "read_secret", lambda **_kwargs: "/tmp/secret-hub")
+def test_cache_root_ignores_the_secret_store(no_overrides, monkeypatch, tmp_path):
+    """cache_root 是四项里唯一不走 funsecret 的。
 
-    assert config.resolve_cache_root() == "/tmp/secret-hub"
+    密钥库跨机器共享，而这是机器本地路径：存进去就意味着另一台机器读到别人的路径。
+    真出过事 —— 密钥库里那条旧路径让一台 Linux 扫出 0 个源、一台 macOS 直接
+    `OSError: [Errno 45]`。这条红了说明 `secret=` 被加回了 `resolve_cache_root`。
+    """
+    cache_root = tmp_path / "hub"
+    monkeypatch.setattr(funsecret, "read_secret", lambda **_kwargs: "/tmp/secret-hub")
+    monkeypatch.setattr(config, "DEFAULT_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(config, "_LEGACY_CACHE_ROOT_WARNED", False)
+
+    assert config.resolve_cache_root() == str(cache_root)
+
+
+def test_a_leftover_cache_root_secret_is_announced(no_overrides, monkeypatch, tmp_path):
+    """密钥库里还压着旧值时必须喊一声，否则升级是静默降级成空候选池。"""
+    warnings: list[str] = []
+    monkeypatch.setattr(funsecret, "read_secret", lambda **_kwargs: "/tmp/secret-hub")
+    monkeypatch.setattr(config, "DEFAULT_CACHE_ROOT", tmp_path / "hub")
+    monkeypatch.setattr(config, "_LEGACY_CACHE_ROOT_WARNED", False)
+    monkeypatch.setattr(
+        config.logger, "warning", lambda message, *args: warnings.append(message.format(*args))
+    )
+
+    config.resolve_cache_root()
+    config.resolve_cache_root()  # 只喊一次，不要每次解析都刷屏
+
+    assert len(warnings) == 1
+    assert "/tmp/secret-hub" in warnings[0]
+    assert "[cache] root" in warnings[0]
+
+
+def test_a_configured_cache_root_never_reads_the_secret_store(no_overrides, monkeypatch, tmp_path):
+    """配了 `[cache] root` 的机器一次密钥库都不该查。
+
+    检查旧值挂在兜底那条路上，不是解析链上 —— 否则就等于把刚拆掉的那一层又以
+    「只读来警告」的形式加了回去，每次解析都要打一次密钥库。
+    """
+
+    def explode(**_kwargs):
+        raise AssertionError("配置已命中，不该再读密钥库")
+
+    monkeypatch.setattr(funsecret, "read_secret", explode)
+    monkeypatch.setattr(config, "_LEGACY_CACHE_ROOT_WARNED", False)
+    _write(tmp_path / "shared-config.toml", f'[cache]\nroot = "{tmp_path / "hubs"}"\n')
+
+    assert config.resolve_cache_root() == str(tmp_path / "hubs")
+
+
+def test_no_warning_when_the_secret_store_is_clean(no_overrides, monkeypatch, tmp_path):
+    """没留旧值就别吓人。"""
+    warnings: list[str] = []
+    monkeypatch.setattr(funsecret, "read_secret", lambda **_kwargs: None)
+    monkeypatch.setattr(config, "DEFAULT_CACHE_ROOT", tmp_path / "hub")
+    monkeypatch.setattr(config, "_LEGACY_CACHE_ROOT_WARNED", False)
+    monkeypatch.setattr(
+        config.logger, "warning", lambda message, *args: warnings.append(message.format(*args))
+    )
+
+    config.resolve_cache_root()
+
+    assert warnings == []
 
 
 def test_database_url_propagates_secret_system_failure(no_overrides, monkeypatch):
@@ -184,24 +243,35 @@ def test_cache_root_falls_back_without_secret_store(no_overrides, monkeypatch, t
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("name", "resolver"),
-    [
-        ("FUNREAD_DATABASE_URL", config.resolve_database_url),
-        ("FUNREAD_CACHE_ROOT", config.resolve_cache_root),
-    ],
-)
-def test_environment_variables_are_ignored(no_overrides, monkeypatch, name, resolver):
+#  两个变量分开测，因为参照物不同：database_url 掉到 funsecret，而 cache_root
+#  已经没有 funsecret 那一层了（见 test_cache_root_ignores_the_secret_store），
+#  它的参照物只能是兜底值。合在一个参数化里就得让断言含糊成「反正不等于环境变量」，
+#  那样把「环境变量没参与」和「解析链整个坏掉」混成同一个绿。
+def test_the_database_url_env_var_is_ignored(no_overrides, monkeypatch):
     """钉住环境变量层的删除。
 
     这条红了说明有人把 `os.environ.get` 加回了解析链。那不只是"多了一层"：两个仓库
     所有测试的生产库隔离都建立在"环境变量不参与解析"之上，加回来等于把隔离交还给
     一个谁都能设的全局变量。
     """
-    monkeypatch.setenv(name, "sqlite:///should-be-ignored")
+    monkeypatch.setenv("FUNREAD_DATABASE_URL", "sqlite:///should-be-ignored")
     monkeypatch.setattr(funsecret, "read_secret", lambda **_kwargs: "sqlite:///from-secret.db")
 
-    assert resolver() == "sqlite:///from-secret.db"
+    assert config.resolve_database_url() == "sqlite:///from-secret.db"
+
+
+def test_the_cache_root_env_var_is_ignored(no_overrides, monkeypatch, tmp_path):
+    """同上，但参照物是兜底值。
+
+    `DEFAULT_CACHE_ROOT` 必须一起 monkeypatch：兜底会**建目录**，不挡住的话这条
+    用例会在跑测试的人的真实家目录下留下 ~/.cache/farfarfun/funread/hub。
+    """
+    fallback = tmp_path / "fallback-hub"
+    monkeypatch.setenv("FUNREAD_CACHE_ROOT", str(tmp_path / "from-env"))
+    monkeypatch.setattr(config, "DEFAULT_CACHE_ROOT", fallback)
+    monkeypatch.setattr(config, "_LEGACY_CACHE_ROOT_WARNED", True)
+
+    assert config.resolve_cache_root() == str(fallback)
 
 
 def test_ignored_env_vars_reports_what_is_still_set(monkeypatch):

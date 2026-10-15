@@ -13,7 +13,9 @@ funread 全家的每一个设置项都走这一条链，没有例外，也**不�
    ``~/.farfarfun/funread/api/config.toml``）按注册顺序优先，最后兜到共享根文件
    :func:`shared_config_path`（``~/.farfarfun/funread/config.toml``）。
 3. **funsecret** —— 凭据的推荐位置。config.toml 也能放凭据，但密钥库里的那份不必
-   落到每台机器的磁盘上。
+   落到每台机器的磁盘上。**只放换台机器照样成立的值**：库地址、口令属于这一类，
+   本地路径不属于 —— 密钥库是跨机器共享的，一台机器写进去，另一台就读到别人的路径。
+   :func:`resolve_cache_root` 因此不走这一层，理由写在它的 docstring 里。
 4. **兜底** —— 本地 SQLite / 用户缓存目录。让一份新 clone 在没有任何密钥库、没有任何
    配置文件的情况下也能把管线和 API 跑起来。
 
@@ -88,6 +90,9 @@ _revision = 0
 #: path -> ((mtime_ns, size), 解析结果)。不带缓存的话每次 ``resolve_*`` 都读盘，
 #: 而 API 的每个请求都会走到这里。
 _document_cache: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+#: 「密钥库里还压着废弃的 cache_root」这条警告只发一次，见
+#: :func:`_warn_legacy_cache_root_secret`。
+_LEGACY_CACHE_ROOT_WARNED = False
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +404,36 @@ def _fallback_to_default() -> str:
 
 
 def _fallback_cache_root() -> str:
+    """兜底到用户缓存目录，顺带检查密钥库里是否还压着那条废弃的路径。
+
+    只在兜底这条路上查密钥库：配了 ``[cache] root`` 的机器一次都不会查。
+    """
+    _warn_legacy_cache_root_secret()
     DEFAULT_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     return str(DEFAULT_CACHE_ROOT)
+
+
+def _warn_legacy_cache_root_secret() -> None:
+    """密钥库里还留着 ``funread/cache/path/root`` 就喊一声，只喊一次。
+
+    不喊的话升级是**静默降级**：原先靠这一项配归档目录的机器会无声地掉到用户缓存
+    目录，那里是空的，于是候选池扫出 0 个源 —— 表现是「搜不到书」，而不是任何一条
+    错误信息，排查起来要一路挖到这里。
+    """
+    global _LEGACY_CACHE_ROOT_WARNED
+    with _LOCK:
+        if _LEGACY_CACHE_ROOT_WARNED:
+            return
+        _LEGACY_CACHE_ROOT_WARNED = True
+    stale = read_secret_value(cate2="cache", cate3="path", cate4="root")
+    if stale is not None and str(stale).strip():
+        logger.warning(
+            "funsecret 的 funread/cache/path/root 已不再被读取（它是机器本地路径，"
+            "不该放在跨机器共享的密钥库里），当前回落到 {}。"
+            "要指定归档目录请写 config.toml 的 [cache] root。密钥库里那份是 {}",
+            DEFAULT_CACHE_ROOT,
+            stale,
+        )
 
 
 def resolve_database_url() -> str:
@@ -420,16 +453,23 @@ def resolve_database_url() -> str:
 
 
 def resolve_cache_root() -> str:
-    """源文件缓存目录：override > config.toml ``[cache] root`` > funsecret > 用户缓存目录。
+    """源文件缓存目录：override > config.toml ``[cache] root`` > 用户缓存目录。
 
     兜底这一层是必须的。管线任务以前直接读 funsecret 且没有兜底，于是任何没配密钥库
     的进程（API 服务、新 clone、CI）都用不了。
+
+    **这一项故意不走 funsecret**，是四个设置项里唯一的例外。密钥库是跨机器共享的，
+    而这是一条机器本地路径：一台机器写进去，另一台就读到别人的路径。2026-10-15 两台
+    机器同时栽在这上面 —— 密钥库里存着 funread-dat 还是独立仓库时的旧路径，Linux 那台
+    因此扫出 0 个源（目录不存在，静默兜底成空的候选池），macOS 那台更直接，``/home``
+    在 macOS 上是 autofs 挂载点，建目录当场 ``OSError: [Errno 45]``，搜索接口 500。
+
+    判据是「这个值换台机器还成不成立」：库地址、口令换台机器照样对，归档目录不是。
     """
     return str(
         resolve_setting(
             "cache_root",
             candidates=(("cache", "root"), (None, "cache_root")),
-            secret=("cache", "path", "root"),
             fallback=_fallback_cache_root,
         )
     )
