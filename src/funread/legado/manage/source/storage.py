@@ -17,6 +17,7 @@ from sqlalchemy import (
     desc,
     event,
     func,
+    insert,
     inspect,
     select,
     text,
@@ -524,6 +525,65 @@ def upsert_source_index_records(
         session.commit()
 
 
+#: 单条 INSERT 里最多塞多少个绑定参数。PostgreSQL 的硬上限是 65535，SQLite 是
+#: 32766，取 30000 对两边都安全；每批行数由它除以列数反推。
+_MAX_BIND_PARAMS = 30000
+
+
+def _bulk_insert(session: Session, model: type, rows: list[dict[str, Any]]) -> None:
+    """批量写入。PostgreSQL 走 COPY，其余方言走多值 INSERT。
+
+    原先是 `session.add()` 一行一条，全量重建 source_index_records（68 万行）
+    实测 604 秒。远程库上这件事几乎全是网络往返和索引维护的开销，跟机器无关。
+
+    2 万行真实 RDS 实测：
+
+        executemany          11.54s   1,733 行/秒
+        多值 INSERT          11.14s   1,795 行/秒
+        COPY                  4.11s   4,864 行/秒
+
+    `session.execute(insert(m), [dict, ...])` 看着像批量，实际走 DBAPI 的
+    `executemany` —— psycopg2 那边是逐条执行的，所以和多值 INSERT 打平、相对
+    逐条 add 也省不下什么。COPY 是唯一有数量级差别的那条路。
+    """
+    if not rows:
+        return
+    columns = list(rows[0].keys())
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        _copy_into(session, model, columns, rows)
+        return
+    per_chunk = max(1, _MAX_BIND_PARAMS // max(1, len(columns)))
+    for start in range(0, len(rows), per_chunk):
+        chunk = rows[start : start + per_chunk]
+        if chunk:
+            session.execute(insert(model).values(chunk))
+
+
+def _copy_into(
+    session: Session, model: type, columns: list[str], rows: list[dict[str, Any]]
+) -> None:
+    """PostgreSQL 的 COPY ... FROM STDIN。
+
+    走 CSV 格式而不是默认的文本格式：源站 hostname 和 URL 里出现制表符、换行或
+    反斜杠都是可能的，文本格式要自己转义，漏一处就是一行错位的数据。CSV 的引号
+    规则交给 `csv.writer`，不手写。
+    """
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    for row in rows:
+        writer.writerow([row[name] for name in columns])
+    buffer.seek(0)
+
+    quoted = ", ".join(f'"{name}"' for name in columns)
+    statement = f'COPY "{model.__tablename__}" ({quoted}) FROM STDIN WITH (FORMAT csv)'
+    raw = session.connection().connection.dbapi_connection
+    with raw.cursor() as cursor:
+        cursor.copy_expert(statement, buffer)
+
+
 def replace_source_index_records(
     records: list[dict[str, Any]],
     source_type: str,
@@ -536,26 +596,33 @@ def replace_source_index_records(
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
 
+    now = utcnow()
+    #  按主键收口而不是直接堆进列表：`md5` 是主键，而批量写入没有逐条 add 那种
+    #  一行一条、后写覆盖先写的兜底 —— 重复键会让整个 chunk 失败。用 dict 收敛
+    #  成「后出现的那条胜出」，与原先逐条写入的结果一致。
+    deduped: dict[str, dict[str, Any]] = {}
+    for payload in records:
+        md5 = str(payload.get("md5") or "")
+        hostname = str(payload.get("hostname") or "")
+        url_id = payload.get("url_id")
+        cate1 = payload.get("cate1")
+        if not md5 or not hostname or url_id is None or cate1 is None:
+            continue
+        deduped[md5] = {
+            "md5": md5,
+            "source_type": source_type,
+            "url_id": int(url_id),
+            "hostname": hostname,
+            "cate1": int(cate1),
+            "created_at": now,
+            "updated_at": now,
+        }
+
     with session_factory() as session:
         session.execute(
             delete(SourceIndexRecord).where(SourceIndexRecord.source_type == source_type)
         )
-        for payload in records:
-            md5 = str(payload.get("md5") or "")
-            hostname = str(payload.get("hostname") or "")
-            url_id = payload.get("url_id")
-            cate1 = payload.get("cate1")
-            if not md5 or not hostname or url_id is None or cate1 is None:
-                continue
-            session.add(
-                SourceIndexRecord(
-                    md5=md5,
-                    source_type=source_type,
-                    url_id=int(url_id),
-                    hostname=hostname,
-                    cate1=int(cate1),
-                )
-            )
+        _bulk_insert(session, SourceIndexRecord, list(deduped.values()))
         session.commit()
 
 
@@ -610,27 +677,49 @@ def replace_source_detail_records(
     init_source_db(database_url=database_url)
     session_factory = _get_session_factory(database_url=database_url)
 
+    now = utcnow()
+    #  这张表有**两个**唯一性约束，批量写入时都会让整个 chunk 失败，所以两个都要
+    #  在这里收敛：主键是 `(source_type, url_md5)`（本函数内 source_type 固定，
+    #  等价于按 url_md5），另有 `uq_source_detail_records_id` 管着 `id`。
+    deduped: dict[str, dict[str, Any]] = {}
+    for payload in records:
+        record_id = payload.get("id")
+        url = str(payload.get("url") or "")
+        version = payload.get("version", 0)
+        status = normalize_source_status(payload.get("status"))
+        if record_id is None or not url:
+            continue
+        deduped[compute_url_md5(url)] = {
+            "id": int(record_id),
+            "url": url,
+            "url_md5": compute_url_md5(url),
+            "source_type": source_type,
+            "version": int(version),
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for row in deduped.values():
+        if row["id"] in seen_ids:
+            #  同一个 id 落在两个不同 URL 上。丢掉后来的并喊一声 —— 静默丢弃会让
+            #  「这个源怎么在库里查不到」变成一桩无从查起的悬案。
+            logger.warning(
+                "source_detail_records: id={} 已被另一条 URL 占用，跳过 url={}",
+                row["id"],
+                row["url"],
+            )
+            continue
+        seen_ids.add(row["id"])
+        rows.append(row)
+
     with session_factory() as session:
         session.execute(
             delete(SourceDetailRecord).where(SourceDetailRecord.source_type == source_type)
         )
-        for payload in records:
-            record_id = payload.get("id")
-            url = str(payload.get("url") or "")
-            version = payload.get("version", 0)
-            status = normalize_source_status(payload.get("status"))
-            if record_id is None or not url:
-                continue
-            session.add(
-                SourceDetailRecord(
-                    id=int(record_id),
-                    url=url,
-                    url_md5=compute_url_md5(url),
-                    source_type=source_type,
-                    version=int(version),
-                    status=status,
-                )
-            )
+        _bulk_insert(session, SourceDetailRecord, rows)
         session.commit()
 
 
