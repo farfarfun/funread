@@ -31,9 +31,12 @@ from farlog import getLogger
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     Integer,
     String,
     Text,
+    case,
+    cast,
     delete,
     func,
     inspect,
@@ -81,6 +84,16 @@ class ReaderSourcePref(ReaderBase):
     #: 不存的话「列出能浏览分类的源」就要现场读 5,606 个 JSON 文件。
     has_explore: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 主动测试的累计次数与其中成功的次数。成功率 = `test_ok_count / test_count`，
+    #: 它是选源的**第一排序键**。
+    #:
+    #: 和 `fail_count`/`last_ok_at` 的区别：那两个是**用户真实搜索时顺带记下的**，
+    #: 稀疏且有偏（没被选中的源永远不会有记录，而没记录又让它更难被选中）。这两个
+    #: 是管理端**主动批量测出来的**，每个源都测、可以反复测，所以是可比的。
+    #:
+    #: 每轮批量测试给每个源记一次，跑 100 轮就是 100 次 —— 不是一次测 100 遍。
+    test_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    test_ok_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_ok_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -261,7 +274,11 @@ _USER_SCOPED_TABLES = {
 #: 后来补的普通列（不进主键），`ALTER TABLE ADD COLUMN` 就够。
 #: 格式：表名 → [(列名, DDL 片段)]
 _ADDED_COLUMNS = {
-    "reader_source_prefs": [("has_explore", "BOOLEAN NOT NULL DEFAULT 0")],
+    "reader_source_prefs": [
+        ("has_explore", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("test_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("test_ok_count", "INTEGER NOT NULL DEFAULT 0"),
+    ],
     "reader_shelf": [
         ("group", "VARCHAR(128) NOT NULL DEFAULT ''"),
         ("chapter_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -442,12 +459,20 @@ def list_source_prefs(
     explore_only: bool = False,
     database_url: Optional[str] = None,
 ) -> List[ReaderSourcePref]:
-    """按「真跑通过的优先、失败少优先、权重高优先」列出源。
+    """按「测试成功率高的优先，其次真跑通过的、失败少的、权重高的」列出源。
 
     排序顺序就是选源策略的全部 —— 聚合搜索只取前 N 个，排错了等于没过滤。
-    第一项是 `last_ok_at IS NULL` 升序：**实跑成功过**的源排在从没试过的前面。
-    采集侧的 `status==2` 只说明某次 GET 过站点首页，拿它当「能读」的依据会得到
-    个位数百分比的命中率；真正可信的信号只有自己跑出来的那一次成功。
+
+    第一键是**主动测试的成功率**（`test_ok_count / test_count`）。采集侧的
+    `status==2` 只说明某次 GET 过站点首页，拿它当「能读」的依据会得到个位数
+    百分比的命中率；真正可信的信号是自己反复测出来的通过率。
+
+    没测过的源算 0.5 —— 不是 0。算 0 会把它们压到「测过且全失败」的源下面，
+    而那些源是已知不能用的，新源至少还是未知；算 1 又会让没测过的霸占前排，
+    测试就白做了。0.5 让「测出来比一半强」的排到未知前面，反之沉下去。
+
+    后面三键维持原样，作为同分时的细分：实跑成功过的优先、失败少的优先、
+    权重高的优先。
     """
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
@@ -456,7 +481,16 @@ def list_source_prefs(
             stmt = stmt.where(ReaderSourcePref.enabled.is_(True))
         if explore_only:
             stmt = stmt.where(ReaderSourcePref.has_explore.is_(True))
+        #  整数除法会把 7/10 算成 0，必须先转浮点再除
+        success_rate = case(
+            (
+                ReaderSourcePref.test_count > 0,
+                cast(ReaderSourcePref.test_ok_count, Float) / ReaderSourcePref.test_count,
+            ),
+            else_=0.5,
+        )
         stmt = stmt.order_by(
+            success_rate.desc(),
             ReaderSourcePref.last_ok_at.is_(None).asc(),
             ReaderSourcePref.fail_count.asc(),
             ReaderSourcePref.weight.desc(),
@@ -497,6 +531,65 @@ def record_source_result(
             if disable_after is not None and row.fail_count >= int(disable_after):
                 row.enabled = False
         session.commit()
+
+
+def record_source_test(
+    source_type: str,
+    url_id: int,
+    ok: bool,
+    error: str = "",
+    database_url: Optional[str] = None,
+) -> None:
+    """记一次**主动测试**的结果：累加 `test_count`，成功再累加 `test_ok_count`。
+
+    和 `record_source_result` 分开，因为两者语义不同：
+
+    - 那个记的是用户真实搜索时顺带的结果，所以成功要把 `fail_count` **清零**
+      （站点刚才还活着，之前的失败不该继续压着它）。
+    - 这个是管理端批量测出来的样本，**只累加、不清零** —— 测 100 次成功 10 次就
+      该是 10/100，中间某次成功把前面 90 次失败抹掉的话，这个比率就没有意义了。
+
+    成功时顺带更新 `last_ok_at`（它确实刚跑通过），但失败时**不碰** `fail_count`，
+    免得一轮批量测试把所有源的实跑失败计数集体拉高、搅乱另一套信号。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        row = session.get(ReaderSourcePref, (source_type, int(url_id)))
+        if row is None:
+            row = ReaderSourcePref(source_type=source_type, url_id=int(url_id))
+            session.add(row)
+        row.test_count = int(row.test_count or 0) + 1
+        if ok:
+            row.test_ok_count = int(row.test_ok_count or 0) + 1
+            row.last_ok_at = utcnow()
+            row.last_error = None
+        else:
+            row.last_error = (error or "")[:1024] or None
+        session.commit()
+
+
+def reset_source_tests(
+    source_type: str,
+    url_id: Optional[int] = None,
+    database_url: Optional[str] = None,
+) -> int:
+    """清空测试计数。`url_id` 为空就清整个类型。
+
+    需要它是因为成功率是**累计**的：源站换了域名、规则修好了之后，旧的失败样本
+    会一直压着它排不上来。清零相当于「重新认识这个源」。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = (
+            update(ReaderSourcePref)
+            .where(ReaderSourcePref.source_type == source_type)
+            .values(test_count=0, test_ok_count=0)
+        )
+        if url_id is not None:
+            stmt = stmt.where(ReaderSourcePref.url_id == int(url_id))
+        result = session.execute(stmt)
+        session.commit()
+        return int(result.rowcount or 0)
 
 
 # ------------------------------------------------------------------ 书架
@@ -1117,6 +1210,8 @@ __all__ = [
     "list_subscriptions",
     "mark_all_read",
     "record_source_result",
+    "record_source_test",
+    "reset_source_tests",
     "record_subscription_fetch",
     "remove_shelf_book",
     "remove_subscription",

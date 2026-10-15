@@ -68,6 +68,11 @@ SWITCH_ENOUGH_HITS = 20
 SEARCH_TIMEOUT = (6, 12)
 DETAIL_TIMEOUT = (10, 20)
 
+#: 书源可用性探测用的固定关键词。固定才可比 —— 每个源换一个词的话，测出来的
+#: 差异分不清是源的问题还是词的问题。「我的」在中文书名里极常见，搜不到基本
+#: 就是源本身坏了，而不是这个库里真没有匹配的书。
+PROBE_KEYWORD = "我的"
+
 #  批量下载的节流间隔（秒）。串行 + 停顿，别把人家站点打挂。
 DOWNLOAD_INTERVAL = 0.5
 
@@ -326,6 +331,40 @@ class ReaderService:
     ) -> List[Dict[str, Any]]:
         """只要结果、不要统计时的薄包装。"""
         return self.search_report(keyword, max_sources=max_sources, workers=workers)["items"]
+
+    # ------------------------------------------------------------------ 可用性测试
+
+    def test_source(self, url_id: int) -> tuple[bool, str]:
+        """测一个书源：拿固定关键词搜一次，**搜出书**才算成功。
+
+        关键词固定成 `PROBE_KEYWORD`，因为成功率要在源之间可比 —— 每个源换一个词
+        的话，测出来的差异分不清是源的问题还是词的问题。选「我的」是因为它在中文
+        书名里极常见，搜不到基本就是源本身的问题，而不是这个库里真没有匹配的书。
+
+        判据是「有没有解析出书目」而不是「HTTP 有没有 200」：源站挂掉后常见的表现
+        是返回一个 200 的首页或错误页，照样 GET 得通。采集侧的 `status==2` 就是这
+        么来的，实测 100 个标可用的源只有 21 个真能搜出东西。
+
+        **不复用 `_run`**：那个会把失败写进 `fail_count`，而批量测试会把所有源跑
+        一遍，让实跑失败计数集体虚高、还可能触发自动停用。测试的成败只进
+        `test_count`/`test_ok_count`，由调用方记。
+        """
+        spec = self.registry.load_spec(int(url_id))
+        if spec is None:
+            return False, "归档里找不到这个源（文件可能已被清理）"
+        try:
+            with self.fetcher_factory(timeout=SEARCH_TIMEOUT) as fetcher:
+                engine = BookSourceEngine(spec, fetcher, allow_web_view=self.allow_web_view)
+                books = engine.search(PROBE_KEYWORD)
+            if not books:
+                return False, f"搜「{PROBE_KEYWORD}」成功但没有解析出书目"
+            return True, ""
+        except (JsNotSupportedError, UnsupportedFeatureError) as exc:
+            #  结构性不支持，重试多少次都一样。照样记失败：成功率要反映「现在能不
+            #  能用」，而不是「是不是我们的锅」。
+            return False, f"{type(exc).__name__}: {exc}"[:500]
+        except Exception as exc:  # noqa: BLE001 — 网络层什么都可能抛，一律记失败
+            return False, f"{type(exc).__name__}: {exc}"[:500]
 
     # ------------------------------------------------------------------ 发现
 

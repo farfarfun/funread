@@ -105,6 +105,63 @@ class RssService:
 
     # ------------------------------------------------------------------ 订阅
 
+    def _record_usage(self, row, ok: bool, error: str = "") -> None:
+        """把一次真实抓取计进这个源的成功率样本。
+
+        只记归档源：自填 feed 不在候选池里，没有 `reader_source_prefs` 行，也就
+        无所谓排序。
+
+        用 `record_source_test` 而不是 `record_source_result`，因为要的是**可比的
+        累计样本**。两者并存：那个管「连续失败就停用」，这个管排序权重。
+
+        「成功」的判据和主动测试保持一致 —— 解析出条目才算。HTTP 200 不算：源站
+        挂掉后常见的表现就是回一个 200 的错误页。
+        """
+        if row.kind != KIND_LEGADO or not row.url_id:
+            return
+        try:
+            storage.record_source_test(
+                "rss",
+                int(row.url_id),
+                ok=ok,
+                error=error,
+                database_url=self.database_url,
+            )
+        except Exception:  # noqa: BLE001 — 统计失败绝不能影响用户正在看的内容
+            logger.warning("记录订阅源使用样本失败 url_id={}", row.url_id)
+
+    # ------------------------------------------------------------------ 可用性测试
+
+    def test_source(self, url_id: int) -> tuple[bool, str]:
+        """测一个订阅源：抓一次文章列表，**拿到条目**才算成功。
+
+        判据是「有没有解析出文章」而不是「HTTP 有没有 200」—— 源站挂掉之后常见的
+        表现是返回一个 200 的首页或者错误页，照样能 GET 通。采集侧的 `status==2`
+        就是这么来的，而它对应的真实可用率是个位数。
+
+        返回 `(成功?, 失败原因)`。原因会落到 `last_error` 上，是管理端排查的唯一
+        线索，所以要保留具体类型 —— 「需要 JS」和「连接超时」的处置完全不同。
+        """
+        try:
+            spec = self.registry.load_spec(int(url_id))
+            if spec is None:
+                return False, "归档里找不到这个源（文件可能已被清理）"
+            with self.fetcher_factory(timeout=FETCH_TIMEOUT) as fetcher:
+                engine = RssSourceEngine(spec, fetcher, allow_web_view=self.allow_web_view)
+                page = engine.articles(None)
+            count = len(page.items)
+            if not count:
+                return False, "抓取成功但没有解析出任何文章"
+            return True, ""
+        except (JsNotSupportedError, WebViewNotSupportedError, UnsupportedFeatureError) as exc:
+            #  结构性不支持，重试多少次都一样。照样记为失败：成功率要反映「现在
+            #  这个源能不能用」，而不是「它是不是我们的锅」。
+            return False, f"{type(exc).__name__}: {exc}"[:500]
+        except RuleSyntaxError as exc:
+            return False, f"规则有问题：{exc}"[:500]
+        except Exception as exc:  # noqa: BLE001 — 网络层什么都可能抛，一律记为失败
+            return False, f"{type(exc).__name__}: {exc}"[:500]
+
     def _spec(self, url_id: int) -> SourceSpec:
         spec = self.registry.load_spec(url_id)
         if spec is None:
@@ -249,8 +306,12 @@ class RssService:
             storage.record_subscription_fetch(
                 sub_id, user_id=user_id, error=str(exc), database_url=self.database_url
             )
+            self._record_usage(row, ok=False, error=str(exc))
             raise
         storage.record_subscription_fetch(sub_id, user_id=user_id, database_url=self.database_url)
+        #  真实使用也是样本，而且比管理端主动测试更贴近实际：它用的是用户真正
+        #  在看的分类和翻页，覆盖到的规则路径更全。
+        self._record_usage(row, ok=bool(result.items))
 
         items = result.items[:limit]
         keys = [storage.compute_article_key(a.link) for a in items if a.link]

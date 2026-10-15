@@ -494,3 +494,111 @@ def test_adding_columns_twice_is_a_no_op(tmp_path, monkeypatch):
     storage.init_reader_db(database_url=url)
 
     assert storage.list_shelf_groups(database_url=url) == [{"name": "玄幻", "count": 1}]
+
+
+# ------------------------------------------------------------------ 测试成功率
+
+
+def test_test_results_accumulate_instead_of_resetting(db):
+    """测试计数是**样本**，只累加不清零。
+
+    和 `record_source_result` 的区别就在这里：那个记的是用户真实搜索时顺带的结果，
+    成功要把 `fail_count` 清零（站点刚才还活着）。而成功率要的是「测 100 次成功
+    几次」，中间某次成功把前面的失败抹掉的话，这个比率就没有意义了。
+    """
+    storage.upsert_source_prefs([{"source_type": "rss", "url_id": 1}], database_url=db)
+
+    storage.record_source_test("rss", 1, ok=False, error="timeout", database_url=db)
+    storage.record_source_test("rss", 1, ok=True, database_url=db)
+    storage.record_source_test("rss", 1, ok=False, error="403", database_url=db)
+
+    row = storage.list_source_prefs(source_type="rss", database_url=db)[0]
+    assert row.test_count == 3
+    assert row.test_ok_count == 1
+
+
+def test_a_test_failure_does_not_touch_the_live_failure_counter(db):
+    """批量测试不该搅乱另一套信号。
+
+    一轮测试会把所有源都跑一遍，要是失败同时累加 `fail_count`，整池源的实跑失败
+    计数会被集体拉高，而那个计数还管着「连续失败自动停用」。
+    """
+    storage.upsert_source_prefs([{"source_type": "rss", "url_id": 1}], database_url=db)
+
+    storage.record_source_test("rss", 1, ok=False, error="boom", database_url=db)
+
+    row = storage.list_source_prefs(source_type="rss", database_url=db)[0]
+    assert row.fail_count == 0
+    assert row.test_count == 1
+
+
+def test_success_rate_outranks_everything_else(db):
+    """成功率是第一排序键，连权重 99 也压不过它。"""
+    storage.upsert_source_prefs(
+        [
+            {"source_type": "rss", "url_id": 1, "weight": 99},
+            {"source_type": "rss", "url_id": 2, "weight": 0},
+        ],
+        database_url=db,
+    )
+    #  2 号测 10 次成 8 次，1 号测 10 次成 1 次
+    for _ in range(8):
+        storage.record_source_test("rss", 2, ok=True, database_url=db)
+    for _ in range(2):
+        storage.record_source_test("rss", 2, ok=False, database_url=db)
+    storage.record_source_test("rss", 1, ok=True, database_url=db)
+    for _ in range(9):
+        storage.record_source_test("rss", 1, ok=False, database_url=db)
+
+    assert [row.url_id for row in storage.list_source_prefs("rss", database_url=db)] == [2, 1]
+
+
+def test_untested_sources_sit_between_good_and_bad_ones(db):
+    """没测过算 0.5：排在「测出来比一半强」的后面，「测了多半不行」的前面。
+
+    不能算 0 —— 那会把新源压到已知不能用的源下面；也不能算 1，否则没测过的霸占
+    前排，测试就白做了。
+    """
+    storage.upsert_source_prefs(
+        [
+            {"source_type": "rss", "url_id": 1},  # 不测，0.5
+            {"source_type": "rss", "url_id": 2},  # 0.8
+            {"source_type": "rss", "url_id": 3},  # 0.2
+        ],
+        database_url=db,
+    )
+    for ok in [True] * 4 + [False]:
+        storage.record_source_test("rss", 2, ok=ok, database_url=db)
+    for ok in [True] + [False] * 4:
+        storage.record_source_test("rss", 3, ok=ok, database_url=db)
+
+    assert [row.url_id for row in storage.list_source_prefs("rss", database_url=db)] == [2, 1, 3]
+
+
+def test_integer_division_does_not_flatten_the_rate(db):
+    """7/10 必须是 0.7，不是 0。
+
+    SQL 里两个整数相除在多数方言下走整数除法，不转浮点的话所有不足 1.0 的成功率
+    都会塌成 0，排序直接失效 —— 而且是静默失效，看着像「排序没生效」。
+    """
+    storage.upsert_source_prefs(
+        [{"source_type": "rss", "url_id": 1}, {"source_type": "rss", "url_id": 2}],
+        database_url=db,
+    )
+    for ok in [True] * 7 + [False] * 3:
+        storage.record_source_test("rss", 1, ok=ok, database_url=db)
+    for ok in [True] * 3 + [False] * 7:
+        storage.record_source_test("rss", 2, ok=ok, database_url=db)
+
+    #  都 <1.0，整数除法下两者都是 0、顺序会退化成 url_id 升序
+    assert [row.url_id for row in storage.list_source_prefs("rss", database_url=db)] == [1, 2]
+
+
+def test_reset_scores_clears_the_samples(db):
+    storage.upsert_source_prefs([{"source_type": "rss", "url_id": 1}], database_url=db)
+    storage.record_source_test("rss", 1, ok=True, database_url=db)
+
+    assert storage.reset_source_tests("rss", database_url=db) == 1
+
+    row = storage.list_source_prefs("rss", database_url=db)[0]
+    assert (row.test_count, row.test_ok_count) == (0, 0)
