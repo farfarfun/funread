@@ -313,22 +313,26 @@ def _parse_default_atom(segment: str) -> DefaultAtom:
     if not parts:
         return DefaultAtom(steps=(), extractor=None, raw=raw)
 
-    if len(parts) > 1:
-        extractor = _as_extractor(parts[-1])
-        step_parts = parts[:-1] if extractor is not None else parts
-        sole = False
+    extractor = _as_extractor(parts[-1])
+    #  尾段歧义：既可能是定位步，也可能是取值。两种解释都留着（steps 含尾段），
+    #  由 `_eval_default` 按 extract 开关挑。见 `DefaultAtom` 的文档。
+    #
+    #  - 只有一段时一律歧义：`chapterName = "text"` 取值，`bookList = "class.result"` 定位。
+    #  - 多段时只有「猜出来的属性名」歧义：`chapterList = ".info@li@a"` 的 `a` 是标签
+    #    定位，`a@href` 的 `href` 是属性 —— 语法上都是单个标识符，分不开。
+    #    漏掉这一条的后果是 `.info@li@a` 选出 `li` 而不是 `a`，于是 `chapterUrl = "href"`
+    #    取到空（li 没有 href），整本书每一章的地址都塌成目录页。
+    ambiguous = extractor is not None and (len(parts) == 1 or extractor.kind == "attr")
+    if extractor is not None and not ambiguous:
+        #  明确的取值关键字（`text`/`html`/`$1`…）只可能是取值，直接摘掉。
+        step_parts = parts[:-1]
     else:
-        # 只有一段：`text` / `href` 这种既像定位步又像取值关键字。两种解释都留着，
-        # 由 `_eval_default` 按 extract 开关挑 —— 列表规则（`class.result`）要定位，
-        # 字段规则（`chapterName = "text"`）要取值。
-        extractor = _as_extractor(parts[0])
         step_parts = parts
-        sole = extractor is not None
 
     # 空分段直接丢掉：前导 `@`（`@name`）只是个分隔符，不该变成一个定位步骤。
     # 留着它会让 steps 非空，进而把当前值强行升格成 HTML —— JSON 行上的 `@name` 就取不到了。
     steps = tuple(_parse_step(p) for p in step_parts if p.strip())
-    return DefaultAtom(steps=steps, extractor=extractor, raw=raw, sole_segment=sole)
+    return DefaultAtom(steps=steps, extractor=extractor, raw=raw, ambiguous_tail=ambiguous)
 
 
 def _parse_css_atom(segment: str) -> CssAtom:

@@ -269,9 +269,10 @@ class RuleEvaluator:
         return html_value(text).items
 
     def _eval_default(self, atom: DefaultAtom, *, extract: bool) -> RuleValue:
-        # 歧义的单段规则：取值时读作取值关键字，定位时读作定位步。
-        # `chapterName = "text"` 和 `bookList = "class.result"` 必须各自拿到对的那一边。
-        steps = () if (extract and atom.sole_segment) else atom.steps
+        # 尾段歧义：取值入口读作取值，定位入口读作定位步。`chapterName = "text"`
+        # 与 `bookList = "class.result"`、`chapterList = ".info@li@a"` 与 `a@href`
+        # 必须各自拿到对的那一边。定位入口保留尾段，取值入口去掉它。
+        steps = atom.steps[:-1] if (extract and atom.ambiguous_tail) else atom.steps
         if steps:
             current = RuleValue(backend=HTML_BACKEND, items=tuple(self._html_items()))
         else:

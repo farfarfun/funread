@@ -76,18 +76,27 @@ class Extractor:
 class DefaultAtom:
     """Default(JSOUP) 方言：`type.name.index@…@output`。
 
-    `sole_segment` 标记「整条规则只有一段、且这一段既可读作定位步也可读作取值
-    关键字」的歧义情形 —— 典型就是 `ruleToc.chapterName = "text"` 与
-    `chapterUrl = "href"`。Legado 对这种规则有**两个入口**：列表规则走
-    `getElements`（每段都是定位），字段规则走 `getString`（最后一段是取值）。
-    语法上分不开，所以这里两种解释都留着，由求值时的 `extract` 开关来选 ——
-    见 `evaluator._eval_default`。
+    `ambiguous_tail` 标记「最后一段既可读作定位步、也可读作取值」的歧义情形。
+    Legado 对规则有**两个入口**：列表规则走 `getElements`（每段都是定位），
+    字段规则走 `getString`（最后一段是取值）。语法上分不开，所以两种解释都留着，
+    由求值时的 `extract` 开关来选 —— 见 `evaluator._eval_default`。歧义成立有两种：
+
+    - **只有一段**：`chapterName = "text"`、`chapterUrl = "href"` 取值，而
+      `bookList = "class.result"` 定位。
+    - **多段且尾段是猜出来的属性名**：`chapterList = ".info@li@a"` 里的 `a` 是
+      标签定位，而 `a@href` 里的 `href` 是属性。两者在语法上长得一模一样 ——
+      都是「单个标识符」，只能靠入口区分。
+
+    明确的取值关键字（`text`/`html`/`$1`…）不在此列：它们只可能是取值，所以
+    多段时直接从 `steps` 里摘掉。
+
+    `steps` 在歧义时**包含尾段**，由 `_eval_default` 在取值入口上去掉它。
     """
 
     steps: Tuple[Step, ...]
     extractor: Optional[Extractor]
     raw: str
-    sole_segment: bool = False
+    ambiguous_tail: bool = False
 
 
 @dataclass(frozen=True)

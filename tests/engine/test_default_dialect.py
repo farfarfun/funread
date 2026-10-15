@@ -160,3 +160,37 @@ def test_unknown_last_segment_is_treated_as_attribute(ev):
     """
     assert ev.string("id.intro@em") == ""
     assert ev.string("id.intro@tag.em@text") == "很好看"
+
+
+def test_list_entry_keeps_the_tail_as_a_locator(ev):
+    """**列表**入口每一段都是定位步，最后一段也是。与上一条正好是一体两面。
+
+    `id.list@li@a` 的 `a` 是标签名，而 `id.intro@em` 的 `em` 当属性名 —— 两者语法
+    上完全一样（裸标识符），只能靠入口区分：Legado 列表走 `getElements`（段段定位），
+    字段走 `getResultLast`（末段取值）。
+
+    搞反的代价是整本书读不出来：`.info@li@a` 会选出 `li`，接着 `chapterUrl = "href"`
+    在 li 上取不到 href（它在子元素 a 上），于是每一章的地址都塌回目录页，正文全空。
+    章节**名**却是对的 —— li 的文本包含 a 的文本 —— 所以目录看上去完全正常，极难察觉。
+    归档里 13264 个书源有 3814 个的 chapterList 是这个形状。
+    """
+    rows = ev.rows("id.list@li@a")
+    assert len(rows) == 3
+    #  行上取裸 href 必须拿到链接。选中 li 的话这里是空字符串。
+    assert rows[0].string("href") == "https://example.com/book/1"
+    assert rows[0].string("text") == "书一"
+    assert [row.string("href") for row in rows] == [
+        "https://example.com/book/1",
+        "https://example.com/book/2",
+        "https://example.com/book/3",
+    ]
+
+
+def test_explicit_extractor_keyword_is_never_a_locator(ev):
+    """明确的取值关键字（`text` 等）不参与上面那个歧义 —— 它只可能是取值。
+
+    所以 `@text` 结尾的规则在列表入口里，定位到的仍然是它前面那一段（`li`），
+    `text` 不会被当成一个标签去找。
+    """
+    assert len(ev.rows("id.list@li@text")) == 3
+    assert ev.strings("id.list@li@a@text") == ["书一", "书二", "书三"]
