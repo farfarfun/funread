@@ -263,8 +263,8 @@ class CheckSourceStatusTask:
         limit: int | None = None,
         max_workers: int = DEFAULT_CHECK_WORKERS,
     ) -> dict[str, int]:
-        #  必须走 resolve_database_url()：直读 funsecret 会绕过
-        #  FUNREAD_DATABASE_URL，本地跑一次探活就写到生产库里了
+        #  必须走 resolve_database_url()：直读 funsecret 会绕过 config.toml 和
+        #  进程内 override 两层，本地跑一次探活就写到生产库里了
         database_url = resolve_database_url()
         with self._create_store(
             self.path,

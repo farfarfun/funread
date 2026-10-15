@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from funread.base import config
 from funread.legado.engine import RuleSyntaxError, WebViewNotSupportedError
 from funread.legado.reader import storage
 from funread.legado.reader.registry import SourceRegistry
@@ -78,7 +79,7 @@ def service(tmp_path, hub, monkeypatch):
 
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'rss-service.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     storage.init_reader_db(url)
 
     pages = {

@@ -5,7 +5,7 @@
 以及 ``MergeSourceTask``/``CheckSourceStatusTask`` 这两个要解析数据库地址与缓存
 根目录的任务入口类，此前都没有单元测试覆盖。它们现在走
 ``funread.base.config`` 的 ``resolve_database_url``/``resolve_cache_root``
-而不是直读 funsecret —— 直读会绕过 ``FUNREAD_DATABASE_URL``。
+而不是直读 funsecret —— 直读会绕过 config.toml 与进程内 override 两层。
 所有用例都通过 monkeypatch 隔离真实网络调用与远端存储。
 """
 
@@ -195,7 +195,7 @@ def test_merge_source_task_rejects_unsupported_source_type(tmp_path):
 def test_check_source_status_task_runs_without_configured_database(monkeypatch, tmp_path):
     """secret 没配时任务也要能跑完，不能抛。
 
-    任务本身不再直读 funsecret —— 直读会绕过 ``FUNREAD_DATABASE_URL``，本地跑一次
+    任务本身不再直读 funsecret —— 直读会绕过 config.toml，本地跑一次
     探活就写到生产库里。所以这里 patch 的是 ``config`` 真正用的那个接缝，并把兜底
     路径也指到 tmp_path，避免测试往真实的 ~/.cache 里建库。
     """
@@ -204,7 +204,7 @@ def test_check_source_status_task_runs_without_configured_database(monkeypatch, 
         raise ValueError("not configured")
 
     fallback = tmp_path / "fallback" / "funread.db"
-    monkeypatch.delenv("FUNREAD_DATABASE_URL", raising=False)
+    config.clear_overrides()
     monkeypatch.setattr(funsecret, "read_secret", _raise_value_error)
     monkeypatch.setattr(config, "DEFAULT_DATABASE_PATH", fallback)
     monkeypatch.setattr(config, "DEFAULT_DATABASE_URL", f"sqlite:///{fallback}")

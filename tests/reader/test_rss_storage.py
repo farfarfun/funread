@@ -2,6 +2,7 @@
 
 import pytest
 
+from funread.base import config
 from funread.legado.reader import storage
 from funread.legado.reader.storage import (
     LOCAL_USER_ID,
@@ -25,7 +26,7 @@ from funread.legado.reader.storage import (
 def db(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'rss.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     init_reader_db(url)
     return url
 

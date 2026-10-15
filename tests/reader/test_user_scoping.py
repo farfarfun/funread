@@ -8,6 +8,7 @@
 import pytest
 from sqlalchemy import text
 
+from funread.base import config
 from funread.legado.reader import storage
 from funread.legado.reader.storage import (
     LOCAL_USER_ID,
@@ -40,7 +41,7 @@ def db(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'reader.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     init_reader_db(url)
     return url
 
@@ -259,7 +260,7 @@ def _create_pre_user_tables(url, rows):
 def test_migration_moves_existing_rows_to_the_local_user(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'legacy.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     init_reader_db(url)
     _create_pre_user_tables(url, [("k1", "剑来"), ("k2", "雪中悍刀行")])
 
@@ -286,7 +287,7 @@ def test_migration_moves_existing_rows_to_the_local_user(tmp_path, monkeypatch):
 def test_migration_is_a_no_op_on_an_already_migrated_database(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     init_reader_db(url)
     upsert_shelf_book({"name": "剑来"}, user_id=3, database_url=url)
 
@@ -300,7 +301,7 @@ def test_migration_then_claim_is_the_whole_upgrade_path(tmp_path, monkeypatch):
     """迁移把存量行归给 user 0，认领再把它交给第一个注册的人。两步合起来才完整。"""
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())
     url = f"sqlite:///{tmp_path / 'upgrade.db'}"
-    monkeypatch.setenv("FUNREAD_DATABASE_URL", url)
+    config.set_overrides(database_url=url)
     init_reader_db(url)
     _create_pre_user_tables(url, [("k1", "剑来")])
     monkeypatch.setattr(storage, "_INITIALIZED_DATABASES", set())

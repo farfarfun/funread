@@ -8,7 +8,7 @@
 
 `reader_user` / `reader_invite_code` 以及口令哈希、登录、邀请码全都搬到
 `funread_api.accounts`，建在 funauth 的 `UserMixin` / `InviteCodeMixin` 上。原因是
-funauth 要求 **SQLAlchemy async + Python 3.12**，而本包的下限是 3.10、整层是同步的
+funauth 要求 **SQLAlchemy async + Python 3.12**，而本包的下限是 3.11、整层是同步的
 —— 把 funauth 拉成 funread 的硬依赖等于替所有只用采集功能的人抬高 Python 下限。
 这一层只认 `user_id` 这个整数，不关心账号是谁发的。
 
