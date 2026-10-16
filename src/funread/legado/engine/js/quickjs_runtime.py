@@ -143,7 +143,10 @@ class QuickJsRuntime:
         ctx.set_max_stack_size(self._stack_size)
 
         host = self._build_host(context)
-        self._install(ctx, host, context)
+        #  本次求值期间失败的宿主调用。单独收着是为了在报错时附上 —— 见下面
+        #  异常分支里的说明。
+        failures: list[str] = []
+        self._install(ctx, host, context, failures)
 
         try:
             return _eval_script(ctx, script)
@@ -154,8 +157,18 @@ class QuickJsRuntime:
             snippet = script.strip()
             if len(snippet) > 120:
                 snippet = snippet[:117] + "..."
+            #  **把宿主调用的失败附在后面**。不附的话排查会被带到沟里：宿主失败
+            #  降级成空串之后，规则下一步往往是 `JSON.parse(result)`，而
+            #  `JSON.parse("")` 报的是 `SyntaxError: unexpected end of input` ——
+            #  看起来像这段 JS 有语法错，而真正的原因是上一行的 java.ajax 没连上。
+            #  这个坑在诊断归档源时真的把人骗过一次。
+            hint = ""
+            if failures:
+                shown = "; ".join(failures[:3])
+                more = f"，另有 {len(failures) - 3} 处" if len(failures) > 3 else ""
+                hint = f"；**期间宿主调用失败**：{shown}{more}"
             raise JsNotSupportedError(
-                f"JS 执行失败：{type(exc).__name__}: {exc}（规则：{snippet!r}）",
+                f"JS 执行失败：{type(exc).__name__}: {exc}{hint}（规则：{snippet!r}）",
                 rule=script,
             ) from exc
 
@@ -185,7 +198,7 @@ class QuickJsRuntime:
 
         return ajax
 
-    def _install(self, ctx: Any, host: HostApi, context: JsContext) -> None:
+    def _install(self, ctx: Any, host: HostApi, context: JsContext, failures: list[str]) -> None:
         bindings: Dict[str, Callable[..., Any]] = {
             "__md5Encode": host.md5_encode,
             "__md5Encode16": host.md5_encode16,
@@ -213,7 +226,7 @@ class QuickJsRuntime:
             "__bookGetVariable": host.book_get_variable,
         }
         for name, func in bindings.items():
-            ctx.add_callable(name, _guard(name, func))
+            ctx.add_callable(name, _guard(name, func, failures))
         ctx.eval(_BOOTSTRAP)
 
         #  规则里可见的变量。`result` 必须是字符串 —— 频率榜第 2 和第 8 的
@@ -227,19 +240,26 @@ class QuickJsRuntime:
         ctx.set("page", int(context.page or 1))
 
 
-def _guard(name: str, func: Callable[..., Any]) -> Callable[..., Any]:
-    """包一层，把宿主函数里的异常挡在 JS 边界外。
+def _guard(name: str, func: Callable[..., Any], failures: list[str]) -> Callable[..., Any]:
+    """包一层，把宿主函数里的异常挡在 JS 边界外，并记下来。
 
     不包的话，一个 `java.ajax` 的网络异常会穿过 quickjs 的 C 栈往上抛，那条路径
     上的行为取决于绑定实现，最糟是整个解释器状态不可用。折成返回空串则让规则
     自己走它的失败分支 —— 规则作者本来就得处理「这个接口没返回东西」。
+
+    但**降级必须留痕**：空串会让规则在后面某处炸，而那个位置报出来的错和真正
+    的原因毫无关系（典型是 `JSON.parse("")` 的 "unexpected end of input"）。
+    所以失败记进 `failures`，由 `eval` 在抛错时一并带出去。
     """
+    short = name.lstrip("_")
 
     def wrapper(*args: Any) -> Any:
         try:
             return func(*args)
         except Exception as exc:  # noqa: BLE001 — 边界处必须拦住全部
-            logger.debug("[js] 宿主调用 {} 失败：{}: {}", name, type(exc).__name__, exc)
+            detail = f"{short}: {type(exc).__name__}: {exc}"
+            logger.debug("[js] 宿主调用失败 {}", detail)
+            failures.append(detail[:200])
             return ""
 
     return wrapper

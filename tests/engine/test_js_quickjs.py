@@ -235,3 +235,32 @@ def test_top_level_return_is_wrapped(runtime, context):
     """唯一需要兜底的形态：顶层 return 在 program 模式下是语法错。"""
     assert runtime.eval("return 42;", context) == 42
     assert runtime.eval('var x = 1; if (x) { return "yes"; } return "no";', context) == "yes"
+
+
+def test_a_failed_host_call_is_named_in_the_error(runtime, context):
+    """宿主调用失败必须出现在最终的错误信息里。
+
+    这条是血泪回归。`java.ajax` 连不上时降级成空串，规则下一行
+    `JSON.parse(ajax_result)` 就会抛 `SyntaxError: unexpected end of input` ——
+    看起来像这段 JS 有语法错，而真正的原因是上一行没连上网。诊断归档源时真的
+    被它骗过一次，花了不少时间去查「JS 片段是不是提取时被截断了」。
+
+    降级本身是对的（异常穿过 quickjs 的 C 栈很危险），但必须留痕。
+    """
+
+    def boom(url: str) -> str:
+        raise ConnectionError("连不上")
+
+    rt = default_js_runtime("quickjs", fetcher=None)
+    #  直接塞一个会炸的 ajax：比起真发网络请求，这样测得准也快
+    rt._make_ajax = lambda: boom  # type: ignore[method-assign]
+
+    with pytest.raises(JsNotSupportedError) as caught:
+        rt.eval('JSON.parse(java.ajax("https://nope.invalid"))', context)
+
+    message = str(caught.value)
+    #  既要有 JS 报的那个误导性错误，也要有真正的原因
+    assert "unexpected end of input" in message
+    assert "宿主调用失败" in message
+    assert "ajax" in message
+    assert "ConnectionError" in message
