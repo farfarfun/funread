@@ -1,6 +1,6 @@
 [project]
 name = "funread"
-version = "1.1.126"
+version = "1.1.127"
 description = "一个用于管理和处理阅读源（Legado 阅读 APP 的书源和 RSS 源）的 Python 工具库"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,13 +33,13 @@ js = [ "quickjs>=1.19.4",]
 reader = [ "funread[parse]",]
 publish = [ "fundrive>=2.0.81; python_version >= '3.12'",]
 
-[dependency-groups]
-dev = [ "pytest>=8.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0", "httpx2>=2.0.0",]
-
 [project.urls]
 Organization = "https://github.com/farfarfun"
 Repository = "https://github.com/farfarfun/funread"
 Releases = "https://github.com/farfarfun/funread/releases"
+
+[dependency-groups]
+dev = [ "pytest>=8.0.0", "pytest-cov>=4.0.0", "ruff>=0.1.0", "mypy>=1.0.0", "httpx2>=2.0.0",]
 
 [tool.ruff]
 line-length = 100
