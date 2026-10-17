@@ -62,3 +62,19 @@ ignore = [ "E501",]
 # would otherwise sort absolute `from funread.base.config import ...` in with
 # the third-party block.
 known-first-party = ["funread"]
+
+[tool.ruff.lint.per-file-ignores]
+# **临时豁免，删掉这一条就是验收标准。**
+#
+# builder.py 用 `from dominate.tags import *` 建 HTML 报告，于是 49 条
+# F403/F405 —— 静态分析认不出 li / a / div 这些名字从哪来。它同时还是**零测试
+# 覆盖**的：tests/test_download_base.py 里那个 `_ReportBuilder` 是个假类，真正
+# 的 SourceReportBuilder（167 行，在 context.py:40 的生产路径上）一行都没被跑过。
+#
+# 不在这里顺手改，是因为项目台账把它记成了一次独立的带测试清理
+# （project-status.yaml 的 risks，due 2026-11-15）：star-import 的名字解析不可
+# 静态验证，改它必须同时补测试，混进别的改动里风险更高。
+#
+# 豁免写在这儿而不是干脆不跑 ruff：这样 CI 能覆盖其余所有文件，而这个文件欠的
+# 债是显式的、有位置、有验收标准的 —— 清理完把这一节删掉，CI 自动接管。
+"src/funread/legado/manage/download/reporting/builder.py" = ["F403", "F405"]

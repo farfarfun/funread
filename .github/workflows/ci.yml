@@ -1,0 +1,61 @@
+name: ci
+
+#  这个仓库在 2026-10-17 之前**没有任何 CI** —— 693 个测试只在谁想起来的时候本地
+#  跑一次，而 `funbuild build` 是直接从本机推 PyPI 的，中间没有任何自动关卡。
+#
+#  **这条流水线不能阻止一个坏版本发出去**（发版不经过它），它能做的是让问题在
+#  push 之后几分钟内可见，而不是等到别人装上。真正的前置关卡要么是发版前本地跑
+#  一遍测试，要么把发布改成 tag 触发 —— 那是另一件事。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        #  3.11 是 pyproject 里 requires-python 的下限，**必须测** —— 声明支持
+        #  却从没在上面跑过的话，那条下限只是一句话。3.12 是实际开发用的版本。
+        #  （funread-api 那边下限是 3.12，因为 funauth 要求它；这个库不跟着抬，
+        #  只用采集功能的人不该被迫升级。）
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 装依赖
+        #  `--all-extras` 把 parse / js / reader / publish 都装上：测试覆盖规则
+        #  引擎（要 lxml、cssselect、jsonpath-ng）和 quickjs 那条 JS 路径，少装
+        #  一个 extra 对应的用例会 skip 而不是报错 —— 绿得毫无意义。
+        #  publish 那个 extra 的 fundrive 带 `python_version >= '3.12'` 标记，
+        #  3.11 上自动跳过，不用在这儿分支。
+        #
+        #  不加 `--locked`：uv.lock 在每次 funbuild 发版时被 `rm -rf` 重建，
+        #  要求它和 pyproject 严格一致只会在无关的时候红。
+        run: uv sync --all-extras --python ${{ matrix.python }}
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: 格式
+        run: uv run ruff format --check .
+
+      - name: pytest
+        #  测试全部离线（注入 StaticFetcher），不碰网络。
+        #  tests/conftest.py 有 autouse fixture 把库地址强制成临时 SQLite ——
+        #  本机的 funsecret 指向生产 PostgreSQL，没有那层隔离，跑一次测试就是往
+        #  生产库里写数据。CI 上没有 funsecret，但那层隔离照样生效。
+        run: uv run pytest -q
