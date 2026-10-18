@@ -4,7 +4,27 @@ import traceback
 from datetime import datetime
 from typing import Any
 
-from dominate.tags import *
+from dominate.tags import (
+    a,
+    b,
+    body,
+    br,
+    div,
+    font,
+    head,
+    hr,
+    html,
+    img,
+    li,
+    p,
+    style,
+    table,
+    tbody,
+    td,
+    th,
+    tr,
+    ul,
+)
 from farlog import getLogger
 
 logger = getLogger("funread")
