@@ -330,6 +330,8 @@ class RssService:
                     "pub_date": article.pub_date,
                     "description": article.description,
                     "image": article.image,
+                    "media_url": article.media_url,
+                    "media_type": article.media_type,
                     "read": bool(state.read) if state else False,
                     "favorited": bool(state.favorited) if state else False,
                     "variables": dict(article.variables),
@@ -414,6 +416,8 @@ class RssService:
             "pub_date": article.pub_date,
             "description": article.description,
             "image": article.image,
+            "media_url": article.media_url,
+            "media_type": article.media_type,
             "content_html": article.content,
         }
 

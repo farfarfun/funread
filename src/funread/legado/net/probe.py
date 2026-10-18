@@ -41,7 +41,7 @@ def run(path: Path, keyword: str, chapter_index: int, limit: int) -> int:
     if missing:
         print(f"⚠️  核心字段缺失：{', '.join(missing)}")
     if spec.needs_js():
-        print("⚠️  该源含 JS 规则，当前阶段跑不通（phase 2 接 quickjs）")
+        print("ℹ️  该源含 JS 规则，走 quickjs 求值；失败时会附上宿主调用的错误")
     _line("=")
 
     with RequestsFetcher() as fetcher:

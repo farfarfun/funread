@@ -58,6 +58,11 @@ def _first(parent, *names: str):
     return None
 
 
+def _children(parent, name: str):
+    """同名的全部直接子元素，忽略命名空间。`media:content` 可以出现多次。"""
+    return [child for child in parent if _localname(child.tag) == name]
+
+
 def _link_of(entry, base_url: str = "") -> str:
     """文章链接。
 
@@ -81,23 +86,65 @@ def _link_of(entry, base_url: str = "") -> str:
     return text if text.startswith(("http://", "https://")) else ""
 
 
+def _media_kind(node) -> str:
+    """`media:content` / `enclosure` 节点的媒体大类：image / audio / video / 空。
+
+    先看 MIME（`type="video/mp4"`），再看 MRSS 自己的 `medium="video"`。两个
+    都没有就返回空 —— 调用方按「不知道是什么」处理，而不是猜。
+    """
+    if node is None:
+        return ""
+    mime = (node.get("type") or "").lower().strip()
+    if "/" in mime:
+        return mime.split("/", 1)[0]
+    return (node.get("medium") or "").lower().strip()
+
+
 def _image_of(entry, description: str, content: str) -> str:
-    """配图。依次试 media:thumbnail / media:content / enclosure / 正文首图。"""
-    for name in ("thumbnail", "content"):
-        node = _first(entry, name)
-        if node is not None and node.get("url"):
+    """配图。依次试 media:thumbnail / media:content / enclosure / 正文首图。
+
+    `media:content` 与 `enclosure` 都要先看类型：它们装的可能是视频或音频，
+    那个 URL 塞进 `<img>` 只会得到一张坏图。类型缺失的 `enclosure` 仍按图片处理
+    （旧 feed 常省略 type），但 `media:content` 没有 type 也没有 medium 的就跳过
+    —— MRSS 里它更常是视频。
+    """
+    node = _first(entry, "thumbnail")
+    if node is not None and node.get("url"):
+        return node.get("url") or ""
+    for node in _children(entry, "content"):
+        if node.get("url") and _media_kind(node) == "image":
             return node.get("url") or ""
     enclosure = _first(entry, "enclosure")
     if enclosure is not None:
         url = (enclosure.get("url") or "").strip()
-        kind = (enclosure.get("type") or "").lower()
-        if url and (not kind or kind.startswith("image/")):
+        if url and _media_kind(enclosure) in ("", "image"):
             return url
     for body in (content, description):
         found = _IMG_RE.search(body or "")
         if found:
             return found.group(1)
     return ""
+
+
+def _media_of(entry) -> tuple:
+    """附件里的音频或视频：`(url, mime)`。没有就 `("", "")`。
+
+    播客的音频地址一直就在 `<enclosure>` 里，早先 `_image_of` 拿到它又因为不是
+    `image/*` 扔掉了。这里把它接住。只认 audio 与 video —— 其它类型（pdf 一类）
+    不是「能在阅读器里播」的东西。
+    """
+    candidates = list(_children(entry, "enclosure")) + list(_children(entry, "content"))
+    for node in candidates:
+        url = (node.get("url") or "").strip()
+        if url and _media_kind(node) in ("audio", "video"):
+            return url, (node.get("type") or "").lower().strip()
+    #  Atom 的 enclosure 是 <link rel="enclosure" href=... type=...>
+    for node in _children(entry, "link"):
+        if (node.get("rel") or "") == "enclosure":
+            url = (node.get("href") or "").strip()
+            if url and _media_kind(node) in ("audio", "video"):
+                return url, (node.get("type") or "").lower().strip()
+    return "", ""
 
 
 def _content_of(entry) -> str:
@@ -185,6 +232,7 @@ def parse_feed(payload, *, source_url: str = "") -> RssPage:
         description = _description_of(entry)
         if not title.strip() and not content.strip():
             continue
+        media_url, media_type = _media_of(entry)
         articles.append(
             RssArticle(
                 title=title,
@@ -192,6 +240,8 @@ def parse_feed(payload, *, source_url: str = "") -> RssPage:
                 pub_date=_pub_date_of(entry),
                 description=description,
                 image=_image_of(entry, description, content),
+                media_url=media_url,
+                media_type=media_type,
                 content=content,
                 source_url=source_url,
                 source_name=feed_title,

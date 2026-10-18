@@ -84,6 +84,10 @@ class RssArticle:
     pub_date: str = ""
     description: str = ""
     image: str = ""
+    #: 附件里的音频或视频（播客、视频 feed）。只有标准 feed 那条腿会填：
+    #: Legado 的 RSS 规则里没有 enclosure 的概念。
+    media_url: str = ""
+    media_type: str = ""
     content: str = ""
     source_url: str = ""
     source_name: str = ""

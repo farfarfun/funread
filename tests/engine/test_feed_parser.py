@@ -218,3 +218,84 @@ def test_feed_title_falls_back_when_it_cannot_parse():
 )
 def test_looks_like_feed(payload, expected):
     assert looks_like_feed(payload) is expected
+
+
+# ---------------------------------------------------------------- 媒体附件
+
+PODCAST = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>某播客</title>
+    <item>
+      <title>第 1 集</title>
+      <link>https://pod.example.com/1</link>
+      <description>第一集</description>
+      <enclosure url="https://pod.example.com/1.mp3" type="audio/mpeg" length="123"/>
+    </item>
+    <item>
+      <title>只有视频没有缩略图</title>
+      <link>https://pod.example.com/2</link>
+      <description>视频</description>
+      <media:content url="https://pod.example.com/2.mp4" type="video/mp4"/>
+    </item>
+    <item>
+      <title>有缩略图也有视频</title>
+      <link>https://pod.example.com/3</link>
+      <description>视频</description>
+      <media:thumbnail url="https://pod.example.com/3.jpg"/>
+      <media:content url="https://pod.example.com/3.mp4" medium="video"/>
+    </item>
+    <item>
+      <title>media:content 装的是图</title>
+      <link>https://pod.example.com/4</link>
+      <description>图</description>
+      <media:content url="https://pod.example.com/4.jpg" medium="image"/>
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def test_an_audio_enclosure_becomes_media_not_image():
+    """播客的音频地址一直在 enclosure 里，早先因为不是 image/* 被扔掉了。"""
+    item = parse_feed(PODCAST).items[0]
+    assert item.media_url == "https://pod.example.com/1.mp3"
+    assert item.media_type == "audio/mpeg"
+    assert item.image == ""
+
+
+def test_a_video_media_content_is_not_mistaken_for_an_image():
+    """旧实现不看 type，把 video/mp4 的 URL 塞进 <img>，得到一张坏图。"""
+    item = parse_feed(PODCAST).items[1]
+    assert item.image == ""
+    assert item.media_url == "https://pod.example.com/2.mp4"
+    assert item.media_type == "video/mp4"
+
+
+def test_thumbnail_and_video_coexist():
+    item = parse_feed(PODCAST).items[2]
+    assert item.image == "https://pod.example.com/3.jpg"
+    assert item.media_url == "https://pod.example.com/3.mp4"
+    #  medium="video" 没给 MIME，media_type 就是空，但 media_url 不能因此丢掉
+    assert item.media_type == ""
+
+
+def test_media_content_with_medium_image_is_still_an_image():
+    item = parse_feed(PODCAST).items[3]
+    assert item.image == "https://pod.example.com/4.jpg"
+    assert item.media_url == ""
+
+
+def test_atom_rel_enclosure_audio_is_media():
+    item = parse_feed(
+        ATOM.replace(
+            '<link rel="enclosure" href="https://www.example.com/audio.mp3"/>',
+            '<link rel="enclosure" href="https://www.example.com/audio.mp3" type="audio/mpeg"/>',
+        )
+    ).items[0]
+    assert item.media_url == "https://www.example.com/audio.mp3"
+    assert item.media_type == "audio/mpeg"
+
+
+def test_plain_articles_have_no_media():
+    assert all(a.media_url == "" for a in parse_feed(RSS_2).items)
