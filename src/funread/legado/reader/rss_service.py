@@ -18,6 +18,7 @@ from farlog import getLogger
 
 from ..engine import (
     JsNotSupportedError,
+    OpmlEntry,
     RssArticle,
     RssPage,
     RssSourceEngine,
@@ -25,8 +26,10 @@ from ..engine import (
     SourceSpec,
     UnsupportedFeatureError,
     WebViewNotSupportedError,
+    build_opml,
     feed_title,
     parse_feed,
+    parse_opml,
 )
 from ..net import RequestsFetcher
 from . import storage
@@ -233,6 +236,61 @@ class RssService:
         if len(data) > MAX_FEED_BYTES:
             raise RuleSyntaxError(f"feed 内容超过 {MAX_FEED_BYTES // 1024 // 1024}MB，拒绝解析")
         return data
+
+    # ------------------------------------------------------------------ OPML
+
+    def import_opml(self, payload, user_id: int) -> Dict[str, Any]:
+        """从一份 OPML 批量订阅。**先入库，不逐条抓。**
+
+        和 `subscribe_feed` 的「先验证再入库」刻意不同：一份 OPML 动辄上百条，
+        逐条同步抓会让导入等很久，而且其中必然有已经挂掉的源。入库之后，抓不动
+        的那些在第一次打开时由 `_record_result` 落到 `last_error`，列表上就有
+        红图标 —— 那条路本来就有。
+
+        返回 `imported`（新订的）、`skipped`（之前就订过的）、`total`。
+        """
+        entries = parse_opml(payload)
+        existing = {
+            row.feed_url.lower()
+            for row in storage.list_subscriptions(user_id=user_id, database_url=self.database_url)
+            if row.kind == KIND_FEED and row.feed_url
+        }
+        imported = 0
+        skipped = 0
+        for entry in entries:
+            url = entry.xml_url.strip()
+            if not url.lower().startswith(("http://", "https://")):
+                skipped += 1
+                continue
+            if url.lower() in existing:
+                skipped += 1
+                continue
+            storage.upsert_subscription(
+                {
+                    "kind": KIND_FEED,
+                    "feed_url": url,
+                    "title": (entry.title or url)[:255],
+                    "group": entry.group[:128],
+                },
+                user_id=user_id,
+                database_url=self.database_url,
+            )
+            existing.add(url.lower())
+            imported += 1
+        return {"imported": imported, "skipped": skipped, "total": len(entries)}
+
+    def export_opml(self, user_id: int) -> str:
+        """把这个人的 feed 订阅导成 OPML。
+
+        归档源（`kind="legado"`）不导：它们没有别的阅读器认得的地址，只有一个
+        我们自己的 `url_id`。
+        """
+        entries = [
+            OpmlEntry(xml_url=row.feed_url, title=row.title or "", group=row.group or "")
+            for row in storage.list_subscriptions(user_id=user_id, database_url=self.database_url)
+            if row.kind == KIND_FEED and row.feed_url
+        ]
+        return build_opml(entries)
 
     def unsubscribe(self, sub_id: str, user_id: int) -> bool:
         return storage.remove_subscription(sub_id, user_id=user_id, database_url=self.database_url)

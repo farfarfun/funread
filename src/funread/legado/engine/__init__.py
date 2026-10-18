@@ -37,6 +37,7 @@ from .models import (
     RssPage,
     SearchBook,
 )
+from .opml import OpmlEntry, build_opml, parse_opml
 from .rss import MAX_ARTICLE_PAGES, RssSourceEngine, absolutize_html
 from .source import CORE_FIELDS, RSS_CORE_FIELDS, SourceSpec, load_source
 from .values import RuleValue
@@ -80,6 +81,9 @@ __all__ = [
     "absolutize_html",
     "default_js_runtime",
     "feed_title",
+    "build_opml",
+    "OpmlEntry",
+    "parse_opml",
     "join_url",
     "load_source",
     "looks_like_feed",

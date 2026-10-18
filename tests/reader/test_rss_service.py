@@ -337,3 +337,57 @@ def test_unsubscribing_someone_elses_subscription_fails(service):
     sub_id = service.subscribe_feed(FEED_URL, user_id=1)["sub_id"]
     assert service.unsubscribe(sub_id, 2) is False
     assert len(service.subscriptions(1)) == 1
+
+
+# ---------------------------------------------------------------- OPML
+
+OPML = """<opml version="2.0"><body>
+  <outline text="科技">
+    <outline text="示例博客" type="rss" xmlUrl="https://blog.example.com/feed.xml"/>
+    <outline text="挂掉的站" type="rss" xmlUrl="https://dead.example.com/feed.xml"/>
+  </outline>
+  <outline text="不是 http 的" type="rss" xmlUrl="ftp://x.example.com/feed"/>
+</body></opml>
+"""
+
+
+def test_import_opml_enters_everything_without_fetching(service):
+    """导入不验证 —— 挂掉的站也先入库，失败留给第一次刷新。"""
+    result = service.import_opml(OPML, user_id=1)
+    assert result == {"imported": 2, "skipped": 1, "total": 3}
+    subs = {s["feed_url"]: s for s in service.subscriptions(user_id=1)}
+    assert subs["https://dead.example.com/feed.xml"]["title"] == "挂掉的站"
+    assert subs["https://dead.example.com/feed.xml"]["group"] == "科技"
+    assert subs["https://dead.example.com/feed.xml"]["last_error"] == ""
+
+
+def test_import_opml_skips_what_is_already_subscribed(service):
+    service.subscribe_feed(FEED_URL, user_id=1, title="我自己起的名字")
+    result = service.import_opml(OPML, user_id=1)
+    assert result["imported"] == 1 and result["skipped"] == 2
+    #  已有的那条不被 OPML 里的名字覆盖
+    titles = {s["feed_url"]: s["title"] for s in service.subscriptions(user_id=1)}
+    assert titles[FEED_URL] == "我自己起的名字"
+
+
+def test_a_dead_import_gets_its_error_on_first_open(service):
+    service.import_opml(OPML, user_id=1)
+    dead = next(
+        s for s in service.subscriptions(user_id=1) if s["feed_url"].startswith("https://dead")
+    )
+    with pytest.raises(Exception):
+        service.articles(dead["sub_id"], user_id=1)
+    assert service.subscription(dead["sub_id"], user_id=1)["last_error"]
+
+
+def test_export_opml_contains_only_feed_subscriptions(service):
+    service.subscribe_feed(FEED_URL, user_id=1, title="示例博客")
+    service.subscribe_legado(1, user_id=1)
+    text = service.export_opml(user_id=1)
+    assert 'xmlUrl="https://blog.example.com/feed.xml"' in text
+    assert "feed.example.com" not in text
+
+
+def test_export_is_per_user(service):
+    service.subscribe_feed(FEED_URL, user_id=1)
+    assert "blog.example.com" not in service.export_opml(user_id=2)
