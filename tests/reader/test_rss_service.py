@@ -391,3 +391,33 @@ def test_export_opml_contains_only_feed_subscriptions(service):
 def test_export_is_per_user(service):
     service.subscribe_feed(FEED_URL, user_id=1)
     assert "blog.example.com" not in service.export_opml(user_id=2)
+
+
+# ---------------------------------------------------------------- 阅读历史
+
+
+def test_history_lists_read_articles_most_recent_first(service):
+    sub_id = service.subscribe_feed(FEED_URL, user_id=1)["sub_id"]
+    items = service.articles(sub_id, user_id=1)["items"]
+    first, second = items[0], items[1]
+    meta = lambda a: {"title": a["title"], "link": a["link"]}  # noqa: E731
+    service.mark_read(sub_id, 1, first["article_key"], True, meta=meta(first))
+    service.mark_read(sub_id, 1, second["article_key"], True, meta=meta(second))
+    history = service.history(user_id=1)
+    assert [h["title"] for h in history] == [second["title"], first["title"]]
+    assert history[0]["read_at"]
+
+
+def test_history_skips_rows_without_a_snapshot(service):
+    """「全部已读」批量标上去、没带快照的行显示不出东西，不列。"""
+    sub_id = service.subscribe_feed(FEED_URL, user_id=1)["sub_id"]
+    service.mark_read(sub_id, 1, "deadbeef", True)
+    assert service.history(user_id=1) == []
+
+
+def test_history_is_per_user_and_excludes_unread(service):
+    sub_id = service.subscribe_feed(FEED_URL, user_id=1)["sub_id"]
+    item = service.articles(sub_id, user_id=1)["items"][0]
+    service.mark_favorite(sub_id, 1, item["article_key"], True, meta={"title": item["title"]})
+    assert service.history(user_id=1) == []  # 收藏了但没读
+    assert service.history(user_id=2) == []

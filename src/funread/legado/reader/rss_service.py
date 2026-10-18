@@ -537,6 +537,24 @@ class RssService:
             database_url=self.database_url,
         )
 
+    def history(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+        """读过的文章，最近读的在前。和收藏一样从快照渲染，不碰 feed。"""
+        return [
+            {
+                "sub_id": row.sub_id,
+                "article_key": row.article_key,
+                "title": row.title,
+                "link": row.link,
+                "pub_date": row.pub_date,
+                "image": row.image,
+                "read_at": row.updated_at.isoformat() if row.updated_at else "",
+                "favorited": bool(row.favorited),
+            }
+            for row in storage.list_history(
+                user_id=user_id, limit=limit, database_url=self.database_url
+            )
+        ]
+
     def favorites(self, user_id: int, sub_id: str = "") -> List[Dict[str, Any]]:
         return [
             {

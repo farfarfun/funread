@@ -1181,6 +1181,32 @@ def list_favorites(
         return list(session.execute(stmt).scalars().all())
 
 
+def list_history(
+    user_id: int = LOCAL_USER_ID,
+    limit: int = 100,
+    database_url: Optional[str] = None,
+) -> List[ReaderRssArticleState]:
+    """读过的文章，最近读的在前。
+
+    就是 `read=True` 的状态行按 `updated_at` 倒排 —— 已读状态本来就落库，
+    「阅读历史」不需要新表。标题为空的行跳过：那是「全部已读」批量标上去、没带
+    快照的，列表里显示不出东西。
+    """
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        stmt = (
+            select(ReaderRssArticleState)
+            .where(
+                ReaderRssArticleState.user_id == int(user_id),
+                ReaderRssArticleState.read.is_(True),
+                ReaderRssArticleState.title != "",
+            )
+            .order_by(ReaderRssArticleState.updated_at.desc())
+            .limit(int(limit))
+        )
+        return list(session.execute(stmt).scalars().all())
+
+
 __all__ = [
     "LOCAL_USER_ID",
     "ReaderBase",
@@ -1205,6 +1231,7 @@ __all__ = [
     "init_reader_db",
     "list_cached_chapter_indexes",
     "list_favorites",
+    "list_history",
     "list_shelf",
     "list_source_prefs",
     "list_subscriptions",
