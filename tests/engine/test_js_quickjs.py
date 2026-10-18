@@ -264,3 +264,47 @@ def test_a_failed_host_call_is_named_in_the_error(runtime, context):
     assert "宿主调用失败" in message
     assert "ajax" in message
     assert "ConnectionError" in message
+
+
+# ---------------------------------------------------------------- 引擎默认运行时
+
+
+def test_the_engine_runs_js_by_default_when_quickjs_is_installed():
+    """早先引擎在 js 没传时落到 NullJsRuntime，而 src 里没有任何调用方传过 js=，
+    于是 quickjs 只在单测里「接上」了，服务层跑的全是 Null。这条钉住默认行为。"""
+    from funread.legado.engine import BookSourceEngine, StaticFetcher, load_source
+
+    spec = load_source(
+        {
+            "bookSourceUrl": "https://a.example.com",
+            "bookSourceName": "a",
+            "searchUrl": "/s?q={{key}}",
+            "ruleSearch": {
+                "bookList": "class.item",
+                "name": "tag.a@text@js:result + '!'",
+                "bookUrl": "tag.a@href",
+            },
+        }
+    )
+    pages = {"https://a.example.com/s?q=k": '<div class="item"><a href="/b/1">书</a></div>'}
+    books = BookSourceEngine(spec, StaticFetcher(pages)).search("k")
+    assert [b.name for b in books] == ["书!"]
+
+
+def test_the_rss_engine_runs_js_by_default_too():
+    from funread.legado.engine import RssSourceEngine, StaticFetcher, load_source
+
+    spec = load_source(
+        {
+            "sourceUrl": "https://r.example.com",
+            "sourceName": "r",
+            "sortUrl": "全部::https://r.example.com/list",
+            "ruleArticles": "class.item",
+            "ruleTitle": "tag.a@text@js:result + '?'",
+            "ruleLink": "tag.a@href",
+        },
+        source_type="rss",
+    )
+    pages = {"https://r.example.com/list": '<div class="item"><a href="/a/1">文</a></div>'}
+    page = RssSourceEngine(spec, StaticFetcher(pages)).articles()
+    assert [a.title for a in page.items] == ["文?"]

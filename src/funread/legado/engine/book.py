@@ -19,9 +19,10 @@ from typing import Dict, List, Optional, Sequence
 from .errors import RuleEmptyError, WebViewNotSupportedError
 from .evaluator import RuleEvaluator, join_url
 from .fetch import Fetcher, Page, parse_url_options
-from .js import JsRuntime, NullJsRuntime
+from .js import JsRuntime
 from .lexer import parse_replace_regex
 from .models import BookInfo, Chapter, ChapterContent, SearchBook
+from .runtime import engine_js_runtime
 from .source import SourceSpec
 from .variables import VariableScope
 
@@ -43,7 +44,8 @@ class BookSourceEngine:
     ):
         self.source = source
         self.fetcher = fetcher
-        self.js = js or NullJsRuntime()
+        #  没传就按可用性挑：装了 quickjs 真执行，没装是 Null（显式报错）。见 runtime.py
+        self.js = js or engine_js_runtime(fetcher, source.base_url)
         self.allow_web_view = allow_web_view
         self.variables = VariableScope()
 
