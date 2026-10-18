@@ -334,3 +334,36 @@ def test_config_revision_changes_on_every_mutation():
 
     assert after != before
     assert config.config_revision() != after
+
+
+def test_a_remote_database_is_announced_once_with_the_password_redacted(
+    no_overrides, monkeypatch, tmp_path
+):
+    """这台机器的默认库是生产 PostgreSQL；忘了隔离的脚本至少要在第一次写入之前看到一行。"""
+    warnings: list[str] = []
+    monkeypatch.setattr(config, "_REMOTE_DATABASE_WARNED", False)
+    monkeypatch.setattr(
+        config.logger, "warning", lambda message, *args: warnings.append(message.format(*args))
+    )
+    _write(
+        tmp_path / "shared-config.toml",
+        '[database]\nurl = "postgresql+psycopg2://funread:S3cret@db.example.com:5432/funread"\n',
+    )
+
+    config.resolve_database_url()
+    config.resolve_database_url()
+
+    assert len(warnings) == 1
+    assert "db.example.com" in warnings[0] and "S3cret" not in warnings[0]
+    assert "set_overrides" in warnings[0]
+
+
+def test_a_local_sqlite_database_is_not_announced(no_overrides, monkeypatch, tmp_path):
+    warnings: list[str] = []
+    monkeypatch.setattr(config, "_REMOTE_DATABASE_WARNED", False)
+    monkeypatch.setattr(
+        config.logger, "warning", lambda message, *args: warnings.append(message.format(*args))
+    )
+    _write(tmp_path / "shared-config.toml", f'[database]\nurl = "sqlite:///{tmp_path}/x.db"\n')
+    config.resolve_database_url()
+    assert warnings == []

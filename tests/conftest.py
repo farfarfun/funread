@@ -36,3 +36,23 @@ def _isolate_database(tmp_path, monkeypatch):
 @pytest.fixture
 def fixtures_dir():
     return os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--fail-on-skip",
+        action="store_true",
+        default=False,
+        help="有任何用例被 skip 就让整次运行失败。CI 用：按 extra 装的依赖缺了，对应用例会"
+        " skip 而不是报错，绿得毫无意义（2026-10-17 发现 29 个用例在静默 skip）。",
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if not session.config.getoption("--fail-on-skip"):
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped = reporter.stats.get("skipped", []) if reporter else []
+    if skipped:
+        reporter.write_line(f"--fail-on-skip：{len(skipped)} 个用例被 skip，按失败处理", red=True)
+        session.exitstatus = 1

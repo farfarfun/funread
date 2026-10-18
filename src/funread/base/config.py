@@ -442,13 +442,44 @@ def resolve_database_url() -> str:
     funsecret 没配会兜到 :data:`DEFAULT_DATABASE_URL`，而不是让调用方失败。密钥库
     **坏掉**则原样抛 —— 默默兜底会藏住"这个进程到底在写哪个库"。
     """
-    return str(
+    url = str(
         resolve_setting(
             "database_url",
             candidates=(("database", "url"), (None, "database_url")),
             secret=("cache", "source", "db_url"),
             fallback=_fallback_to_default,
         )
+    )
+    _announce_remote_database(url)
+    return url
+
+
+_REMOTE_DATABASE_WARNED = False
+
+
+def _announce_remote_database(url: str) -> None:
+    """解析到的不是本地 SQLite 时喊一声（一个进程只喊一次），口令打码。
+
+    这台开发机的 `~/.farfarfun/funread/config.toml` 和 funsecret 都指向生产
+    PostgreSQL。单测被 conftest 兜住了，手写的一次性脚本没人兜 —— 忘了
+    `config.set_overrides(database_url=...)` 就直接写线上。静默不是选项：这行
+    警告是脚本作者唯一能在第一次写入之前看到的东西。
+    """
+    global _REMOTE_DATABASE_WARNED
+    if is_sqlite_url(url):
+        return
+    with _LOCK:
+        if _REMOTE_DATABASE_WARNED:
+            return
+        _REMOTE_DATABASE_WARNED = True
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    target = f"{parts.scheme}://{parts.hostname or '?'}{parts.path or ''}"
+    logger.warning(
+        "数据库指向远端 {} —— 不是本地 SQLite。若这是一次性脚本或本地调试，"
+        '请先 config.set_overrides(database_url="sqlite:///...") 再建任何 store',
+        target,
     )
 
 

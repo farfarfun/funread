@@ -58,4 +58,6 @@ jobs:
         #  tests/conftest.py 有 autouse fixture 把库地址强制成临时 SQLite ——
         #  本机的 funsecret 指向生产 PostgreSQL，没有那层隔离，跑一次测试就是往
         #  生产库里写数据。CI 上没有 funsecret，但那层隔离照样生效。
-        run: uv run pytest -q
+        #  --fail-on-skip：少装一个 extra 对应的用例会 skip 而不是报错，绿得毫无
+        #  意义 —— 这里把 skip 当失败。实现在 tests/conftest.py。
+        run: uv run pytest -q --fail-on-skip
