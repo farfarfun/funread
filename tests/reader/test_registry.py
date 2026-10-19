@@ -1,6 +1,7 @@
 """候选源池：按 url_id 装载、全量扫描、选源。全部走临时归档目录，不打网。"""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -193,16 +194,46 @@ def test_scan_on_an_empty_archive(registry):
 # ------------------------------------------------------------------ 选源
 
 
-def test_candidates_skip_entries_whose_file_vanished(registry, tmp_path):
-    """表里 enabled 但文件没了是会发生的（归档清理 / url_id 重算）。"""
+def test_candidates_survive_removed_archive(registry, tmp_path):
+    """扫描后规则应保存在数据库，不再依赖本地归档。"""
     hubs = tmp_path / "hubs"
     path = _write(hubs, 1, GOOD)
-    _write(hubs, 2, {**GOOD, "bookSourceUrl": "https://two.example.com"})
+    other = _write(hubs, 2, {**GOOD, "bookSourceUrl": "https://two.example.com"})
     registry.scan()
     path.unlink()
+    other.unlink()
     registry.invalidate()
 
-    assert [url_id for url_id, _ in registry.candidates(limit=5)] == [2]
+    assert [url_id for url_id, _ in registry.candidates(limit=5)] == [1, 2]
+    assert registry.scan()["scanned"] == 2
+
+
+def test_saved_rules_take_precedence_over_old_archive(registry, tmp_path):
+    path = _write(tmp_path / "hubs", 1, GOOD)
+    registry.scan()
+    storage.upsert_source_prefs(
+        [{"source_type": "book", "url_id": 1, "source_json": {**GOOD, "bookSourceName": "新规则"}}],
+        database_url=registry.database_url,
+    )
+    registry.scan()
+
+    assert registry.load_spec(1).name == "新规则"
+    assert path.exists()
+
+
+def test_missing_source_does_not_create_archive_directories(registry, tmp_path):
+    assert registry.load_spec(999999) is None
+    assert not (tmp_path / "hubs").exists()
+
+
+def test_concurrent_collection_uses_distinct_ids(registry):
+    def collect(index):
+        source = {**GOOD, "bookSourceUrl": f"https://source{index}.example.com"}
+        return registry.ingest([[source]])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert list(pool.map(collect, range(20))) == [1] * 20
+    assert registry.scan()["scanned"] == 20
 
 
 def test_candidates_respects_the_limit(registry, tmp_path):

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from farlog import getLogger
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Float,
@@ -44,9 +45,9 @@ from sqlalchemy import (
     text,
     update,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, defer, mapped_column, sessionmaker
 
-from ..manage.source.storage import _get_engine, _get_session_factory, utcnow
+from ..manage.source.storage import _DB_INIT_LOCK, _get_engine, _get_session_factory, utcnow
 
 logger = getLogger("funread")
 
@@ -66,7 +67,7 @@ class ReaderSourcePref(ReaderBase):
     """一个源在阅读端的可用性与排序权重。
 
     `is_complete` / `needs_js` 是**静态**扫描结果（源 JSON 里的八个核心字段齐不齐、
-    有没有 JS 规则），一次算好存下来，不必每次搜索都重新解析 13k 个文件。
+    有没有 JS 规则），一次算好存下来；完整规则保存在 `source_json`。
     `fail_count` / `last_ok_at` 是**动态**的实跑结果 —— 语料里 `status==2` 的源
     绝大多数其实已经死了，真正能用哪些只能靠跑出来。
     """
@@ -76,6 +77,7 @@ class ReaderSourcePref(ReaderBase):
     source_type: Mapped[str] = mapped_column(String(32), primary_key=True)
     url_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    source_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     weight: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -193,7 +195,7 @@ class ReaderChapterCache(ReaderBase):
 class ReaderRssSubscription(ReaderBase):
     """一条订阅。两种来源共用一张表，由 `kind` 区分。
 
-    `kind="legado"` → 用归档里的 Legado RSS 源（`url_id` 指过去）；
+    `kind="legado"` → 用数据库里的 Legado RSS 源（`url_id` 指过去）；
     `kind="feed"`  → 用户自己贴的标准 feed 地址（`feed_url`）。
 
     两条腿共用同一张表、同一组 API，是因为对前端来说它们就是「我的订阅」里的
@@ -275,6 +277,7 @@ _USER_SCOPED_TABLES = {
 #: 格式：表名 → [(列名, DDL 片段)]
 _ADDED_COLUMNS = {
     "reader_source_prefs": [
+        ("source_json", "JSON NULL"),
         ("has_explore", "BOOLEAN NOT NULL DEFAULT 0"),
         ("test_count", "INTEGER NOT NULL DEFAULT 0"),
         ("test_ok_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -369,16 +372,17 @@ def _migrate_user_scope(engine) -> None:
 
 
 def init_reader_db(database_url: Optional[str] = None) -> None:
-    engine = _get_engine(database_url)
-    key = str(engine.url)
-    if key in _INITIALIZED_DATABASES:
-        return
-    #  先迁移再 create_all：create_all 只会跳过已存在的表，不会去改它的形状，
-    #  所以旧表必须在这之前重建好。
-    _migrate_user_scope(engine)
-    _migrate_added_columns(engine)
-    ReaderBase.metadata.create_all(engine)
-    _INITIALIZED_DATABASES.add(key)
+    with _DB_INIT_LOCK:
+        engine = _get_engine(database_url)
+        key = str(engine.url)
+        if key in _INITIALIZED_DATABASES:
+            return
+        #  先迁移再 create_all：create_all 只会跳过已存在的表，不会去改它的形状，
+        #  所以旧表必须在这之前重建好。
+        _migrate_user_scope(engine)
+        _migrate_added_columns(engine)
+        ReaderBase.metadata.create_all(engine)
+        _INITIALIZED_DATABASES.add(key)
 
 
 # ------------------------------------------------------------------ 认领无主数据
@@ -432,9 +436,15 @@ def upsert_source_prefs(
         return 0
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
+        types = {str(payload["source_type"]) for payload in records}
+        ids = {int(payload["url_id"]) for payload in records}
         existing = {
             (row.source_type, row.url_id): row
-            for row in session.execute(select(ReaderSourcePref)).scalars().all()
+            for row in session.execute(
+                select(ReaderSourcePref)
+                .options(defer(ReaderSourcePref.source_json))
+                .where(ReaderSourcePref.source_type.in_(types), ReaderSourcePref.url_id.in_(ids))
+            ).scalars()
         }
         for payload in records:
             key = (str(payload["source_type"]), int(payload["url_id"]))
@@ -450,6 +460,34 @@ def upsert_source_prefs(
                     setattr(row, field, value)
         session.commit()
     return len(records)
+
+
+def get_source_json(
+    source_type: str, url_id: int, database_url: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        return session.scalar(
+            select(ReaderSourcePref.source_json).where(
+                ReaderSourcePref.source_type == source_type,
+                ReaderSourcePref.url_id == int(url_id),
+            )
+        )
+
+
+def iter_source_json(source_type: str, database_url: Optional[str] = None):
+    session_factory = get_session_factory(database_url)
+    with session_factory() as session:
+        rows = session.execute(
+            select(ReaderSourcePref.url_id, ReaderSourcePref.source_json)
+            .where(
+                ReaderSourcePref.source_type == source_type,
+                ReaderSourcePref.source_json.is_not(None),
+            )
+            .execution_options(yield_per=500)
+        )
+        for url_id, source_json in rows:
+            yield url_id, source_json
 
 
 def list_source_prefs(
@@ -476,7 +514,11 @@ def list_source_prefs(
     """
     session_factory = get_session_factory(database_url)
     with session_factory() as session:
-        stmt = select(ReaderSourcePref).where(ReaderSourcePref.source_type == source_type)
+        stmt = (
+            select(ReaderSourcePref)
+            .options(defer(ReaderSourcePref.source_json))
+            .where(ReaderSourcePref.source_type == source_type)
+        )
         if enabled_only:
             stmt = stmt.where(ReaderSourcePref.enabled.is_(True))
         if explore_only:

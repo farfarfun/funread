@@ -1,8 +1,4 @@
-"""候选源池：从本地归档里挑出「阅读端真能用」的源。
-
-全量源 JSON 只存在文件里（`<cache_root>/<book|rss>/source/<bucket>/<url_id>.json`），
-库里没有 JSON。所以这一层负责：扫描归档 → 静态判定（字段齐不齐、要不要 JS）→
-把结论写进 `reader_source_prefs`，之后选源只查表，不再碰 13k 个文件。
+"""候选源池：规则保存在数据库，本地归档只用于迁移旧数据。
 
 **不要把采集侧的 `status==2` 当作可用性依据。** 那个标记只代表某次 GET 过站点首页
 （`source/check/task.py` 从头到尾不碰 `searchUrl`），实测 150 个 `status==2` 的源
@@ -11,6 +7,8 @@
 """
 
 import os
+import threading
+from itertools import chain
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from farlog import getLogger
@@ -18,7 +16,15 @@ from farlog import getLogger
 from ..engine import SourceSpec, load_source
 from ..engine.js import default_js_runtime
 from ..manage.download.core.store import LocalSourceStore
-from .storage import ReaderSourcePref, list_source_prefs, upsert_source_prefs
+from ..manage.source.storage import add_source_detail_url, load_source_detail_url_map
+from ..manage.utils import url_to_hostname
+from .storage import (
+    ReaderSourcePref,
+    get_source_json,
+    iter_source_json,
+    list_source_prefs,
+    upsert_source_prefs,
+)
 
 logger = getLogger("funread")
 
@@ -27,13 +33,13 @@ SOURCE_STATUS_AVAILABLE = 2
 
 #  一次写库的批大小。全量扫描有上万条，攒批比逐条 commit 快一个数量级。
 SCAN_BATCH_SIZE = 500
+_INGEST_LOCK = threading.Lock()
 
 
 class SourceRegistry:
     """按 url_id 装载源，并维护候选池。
 
-    `source_type` 是 `"book"` 或 `"rss"` —— 它同时决定归档子目录和
-    `reader_source_prefs` 里的分区。
+    `source_type` 是 `"book"` 或 `"rss"`，决定数据库分区及旧归档子目录。
     """
 
     def __init__(
@@ -49,16 +55,21 @@ class SourceRegistry:
         self.cache_root = cache_root
         self.source_type = source_type
         self.database_url = database_url
-        self.store = LocalSourceStore(path=cache_root, cate1=source_type)
+        self._store: Optional[LocalSourceStore] = None
         self._specs: Dict[int, Optional[SourceSpec]] = {}
+
+    @property
+    def store(self) -> LocalSourceStore:
+        if self._store is None:
+            self._store = LocalSourceStore(path=self.cache_root, cate1=self.source_type)
+        return self._store
 
     # ------------------------------------------------------------------ 装载
 
     def load_spec(self, url_id: int) -> Optional[SourceSpec]:
         """按 url_id 取归一化后的源。取不到 / 解析不了都返回 None。
 
-        结果（包括 None）进内存缓存：一次聚合搜索会反复问同一批 url_id，
-        而且「这个 url_id 没有文件」本身也值得缓存下来，省掉重复的 stat。
+        结果（包括 None）进内存缓存，供同一轮搜索反复使用。
         """
         key = int(url_id)
         if key in self._specs:
@@ -68,7 +79,11 @@ class SourceRegistry:
         return spec
 
     def _load_spec_uncached(self, url_id: int) -> Optional[SourceSpec]:
-        data = self.store.load_by_url_id(url_id)
+        data = get_source_json(self.source_type, url_id, self.database_url)
+        if data is None and os.path.isdir(
+            os.path.join(self.cache_root, self.source_type, "source")
+        ):
+            data = self.store.load_by_url_id(url_id)
         if data is None:
             return None
         try:
@@ -88,7 +103,7 @@ class SourceRegistry:
 
     def iter_archive(self) -> Iterator[Tuple[int, Dict[str, Any]]]:
         """遍历归档，产出 `(url_id, 包装对象)`。坏文件跳过。"""
-        root = self.store.path_bok
+        root = os.path.join(self.cache_root, self.source_type, "source")
         if not os.path.isdir(root):
             return
         for dir_path, _, files in os.walk(root):
@@ -104,13 +119,104 @@ class SourceRegistry:
                     continue
                 yield url_id, data
 
+    def _verdict(
+        self, url_id: int, data: Dict[str, Any], stats: Dict[str, int]
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            spec = load_source(data, source_type=self.source_type)
+        except Exception as exc:
+            logger.debug(f"Failed to load source {self.source_type}/{url_id}: {exc}")
+            return None
+        is_complete = spec.is_complete
+        needs_js = spec.needs_js()
+        web_view = spec.is_web_view
+        has_explore = bool(
+            spec.explore_url.strip()
+            and (
+                spec.has_rule("ruleExplore", "bookList") or spec.has_rule("ruleSearch", "bookList")
+            )
+        )
+        js_available = self.source_type == "book" and default_js_runtime().available()
+        enabled = bool(is_complete and (not needs_js or js_available) and not web_view)
+        for field, present in (
+            ("complete", is_complete),
+            ("needs_js", needs_js),
+            ("web_view", web_view),
+            ("has_explore", has_explore and enabled),
+            ("enabled", enabled),
+        ):
+            stats[field] += int(present)
+        return {
+            "source_type": self.source_type,
+            "url_id": url_id,
+            "name": (spec.name or "")[:255],
+            "source_json": data,
+            "enabled": enabled,
+            "weight": 1 if data.get("status") == SOURCE_STATUS_AVAILABLE else 0,
+            "is_complete": is_complete,
+            "needs_js": needs_js,
+            "has_explore": has_explore,
+        }
+
+    def ingest(self, payloads: List[Any]) -> int:
+        """Persist rules from downloaded Legado lists using existing source IDs."""
+        with _INGEST_LOCK:
+            return self._ingest_locked(payloads)
+
+    def _ingest_locked(self, payloads: List[Any]) -> int:
+        url_key = "bookSourceUrl" if self.source_type == "book" else "sourceUrl"
+        url_map = load_source_detail_url_map(self.source_type, self.database_url)
+        rows: Dict[int, Dict[str, Any]] = {}
+        stats = dict.fromkeys(("complete", "needs_js", "web_view", "has_explore", "enabled"), 0)
+        for payload in payloads:
+            if isinstance(payload, list):
+                items = payload
+            elif isinstance(payload, dict):
+                items = next(
+                    (
+                        payload[key]
+                        for key in ("list", "data")
+                        if isinstance(payload.get(key), list)
+                    ),
+                    [payload],
+                )
+            else:
+                continue
+            for source in items:
+                if not isinstance(source, dict):
+                    continue
+                raw_url = source.get(url_key)
+                hostname = url_to_hostname(raw_url) if isinstance(raw_url, str) else None
+                if not hostname:
+                    continue
+                url_id = url_map.get(hostname)
+                if url_id is None:
+                    url_id = add_source_detail_url(
+                        hostname, self.source_type, database_url=self.database_url
+                    ).id
+                    url_map[hostname] = url_id
+                row = self._verdict(url_id, source, stats)
+                if row is not None:
+                    rows[url_id] = row
+        values = list(rows.values())
+        for start in range(0, len(values), SCAN_BATCH_SIZE):
+            upsert_source_prefs(
+                values[start : start + SCAN_BATCH_SIZE], database_url=self.database_url
+            )
+        self.invalidate()
+        return len(values)
+
     def scan(self, limit: Optional[int] = None) -> Dict[str, int]:
-        """全量扫描归档，把静态判定结果写进 `reader_source_prefs`。
+        """重算数据库规则，并从旧归档补入尚未保存的规则。
 
         只写静态字段（`name`/`enabled`/`weight`/`is_complete`/`needs_js`），
         **不碰** `fail_count`/`last_ok_at`/`last_error` —— 那些是实跑积累下来的，
         重扫一次不该把它们抹掉。
         """
+        with _INGEST_LOCK:
+            return self._scan_locked(limit)
+
+    def _scan_locked(self, limit: Optional[int]) -> Dict[str, int]:
         stats = {
             "scanned": 0,
             "complete": 0,
@@ -120,54 +226,20 @@ class SourceRegistry:
             "enabled": 0,
         }
         batch: List[Dict[str, Any]] = []
-        js_available = self.source_type == "book" and default_js_runtime().available()
-
-        for url_id, data in self.iter_archive():
+        seen: set[int] = set()
+        for url_id, data in chain(
+            iter_source_json(self.source_type, self.database_url), self.iter_archive()
+        ):
             if limit is not None and stats["scanned"] >= limit:
                 break
-            stats["scanned"] += 1
-            spec = self._load_spec_uncached(url_id)
-            if spec is None:
+            if url_id in seen:
                 continue
-            is_complete = spec.is_complete
-            needs_js = spec.needs_js()
-            #  `singleUrl` 型订阅源（归档的 21.7%）规则可能齐、也可能不含 JS，
-            #  但工作方式是把页面塞进 WebView —— 纯 Python 跑不了，不能进候选池。
-            #  书源没有这个形态，`is_web_view` 对它恒为 False。
-            web_view = spec.is_web_view
-            #  发现页要有入口 URL，还要有能解析列表的规则（`ruleExplore.bookList`
-            #  缺省时引擎会回落到 `ruleSearch.bookList`，所以两者有一个就算）
-            has_explore = bool(
-                spec.explore_url.strip()
-                and (
-                    spec.has_rule("ruleExplore", "bookList")
-                    or spec.has_rule("ruleSearch", "bookList")
-                )
-            )
-            enabled = bool(is_complete and (not needs_js or js_available) and not web_view)
-            if is_complete:
-                stats["complete"] += 1
-            if needs_js:
-                stats["needs_js"] += 1
-            if web_view:
-                stats["web_view"] += 1
-            if has_explore and enabled:
-                stats["has_explore"] += 1
-            if enabled:
-                stats["enabled"] += 1
-            batch.append(
-                {
-                    "source_type": self.source_type,
-                    "url_id": url_id,
-                    "name": (spec.name or "")[:255],
-                    "enabled": enabled,
-                    #  首页可达只值一分 —— 它几乎预测不了搜索是否能用
-                    "weight": 1 if data.get("status") == SOURCE_STATUS_AVAILABLE else 0,
-                    "is_complete": is_complete,
-                    "needs_js": needs_js,
-                    "has_explore": has_explore,
-                }
-            )
+            seen.add(url_id)
+            stats["scanned"] += 1
+            row = self._verdict(url_id, data, stats)
+            if row is None:
+                continue
+            batch.append(row)
             if len(batch) >= SCAN_BATCH_SIZE:
                 upsert_source_prefs(batch, database_url=self.database_url)
                 batch = []
@@ -194,11 +266,7 @@ class SourceRegistry:
         )
 
     def candidates(self, limit: int = 20) -> List[Tuple[int, SourceSpec]]:
-        """取前 `limit` 个真能装载的源。
-
-        表里标着 enabled 但文件已经不见了的情况是存在的（归档被清理 / 重算过
-        url_id），所以多取一些再按装载结果截断，而不是直接拿表里的前 N 条。
-        """
+        """取前 `limit` 个真能装载的源。"""
         picked: List[Tuple[int, SourceSpec]] = []
         for item in self.iter_candidates():
             picked.append(item)
@@ -209,9 +277,7 @@ class SourceRegistry:
     def iter_candidates(self) -> Iterator[Tuple[int, SourceSpec]]:
         """按候选池顺序惰性产出 `(url_id, spec)`，跳过装载不出来的。
 
-        生成器而不是列表：书源池实测有 5,606 个可用源，一次把它们的 JSON 全读进来
-        解析既慢又占内存，而分波搜索通常在前几波就停了 —— 后面那几千个压根不该被
-        读到磁盘。
+        生成器避免一次把所有规则 JSON 读进内存。
 
         顺序来自 `list_source_prefs` 的 ORDER BY：**实跑成功过的排最前**。所以用得
         越久，搜索命中得越快 —— 能用的源会浮到池子顶部。

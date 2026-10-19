@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterator
 
@@ -112,6 +113,7 @@ class SourceIndexRecord(Base):
 _ENGINE_CACHE: dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: dict[str, sessionmaker] = {}
 _INITIALIZED_DATABASES = set()
+_DB_INIT_LOCK = threading.RLock()
 SOURCE_DETAIL_ID_START = 10_000_000
 
 
@@ -196,13 +198,16 @@ def get_session_factory(database_url: str | None = None) -> sessionmaker:
 
 def init_source_db(database_url: str | None = None) -> None:
     resolved_url = _get_database_url(database_url)
-    if not resolved_url or resolved_url in _INITIALIZED_DATABASES:
+    if not resolved_url:
         return
-    engine = _get_engine(resolved_url)
-    _migrate_source_detail_records_table(engine)
-    _migrate_source_list_records_table(engine)
-    Base.metadata.create_all(engine)
-    _INITIALIZED_DATABASES.add(resolved_url)
+    with _DB_INIT_LOCK:
+        if resolved_url in _INITIALIZED_DATABASES:
+            return
+        engine = _get_engine(resolved_url)
+        _migrate_source_detail_records_table(engine)
+        _migrate_source_list_records_table(engine)
+        Base.metadata.create_all(engine)
+        _INITIALIZED_DATABASES.add(resolved_url)
 
 
 def _migrate_source_list_records_table(engine: Any) -> None:
