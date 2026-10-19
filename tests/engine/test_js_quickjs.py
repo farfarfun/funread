@@ -5,6 +5,8 @@
 不追求把 Legado 文档上的方法测全。
 """
 
+import time
+
 import pytest
 
 from funread.legado.engine.errors import JsNotSupportedError
@@ -149,6 +151,43 @@ def test_runaway_string_growth_is_stopped(runtime, context):
 def test_infinite_recursion_is_stopped(runtime, context):
     with pytest.raises(JsNotSupportedError, match="JS 执行失败"):
         runtime.eval("function r() { return r(); } r();", context)
+
+
+def test_pure_js_infinite_loop_times_out_without_poisoning_host_calls(context):
+    from funread.legado.engine.js.quickjs_runtime import QuickJsRuntime
+
+    runtime = QuickJsRuntime(timeout=0.2)
+    with pytest.raises(JsNotSupportedError, match="JS 执行超过"):
+        runtime.eval("while (true) {}", context)
+    assert runtime.eval('java.md5Encode("abc")', context).startswith("90015098")
+
+
+def test_ajax_host_call_runs_in_the_parent_process(context):
+    from funread.legado.engine.js.quickjs_runtime import QuickJsRuntime
+
+    calls = []
+
+    class Fetcher:
+        def fetch(self, request):
+            calls.append(request)
+            return type("Response", (), {"text": "正文"})()
+
+    runtime = QuickJsRuntime(fetcher=Fetcher())
+    assert runtime.eval('java.ajax("https://example.com/article")', context) == "正文"
+    assert [request.url for request in calls] == ["https://example.com/article"]
+    assert [request.method for request in calls] == ["GET"]
+
+
+def test_host_call_time_does_not_count_toward_js_timeout(context):
+    from funread.legado.engine.js.quickjs_runtime import QuickJsRuntime
+
+    class Fetcher:
+        def fetch(self, request):
+            time.sleep(0.3)
+            return type("Response", (), {"text": "正文"})()
+
+    runtime = QuickJsRuntime(fetcher=Fetcher(), timeout=0.2)
+    assert runtime.eval('java.ajax("https://example.com/article")', context) == "正文"
 
 
 def test_host_calls_still_work_after_a_limit_was_hit(runtime, context):

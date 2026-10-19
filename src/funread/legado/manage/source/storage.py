@@ -1,6 +1,7 @@
 """Source list and source detail persistence."""
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterator
 
@@ -27,6 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from funread.base.config import is_sqlite_url, resolve_database_url
 
 logger = getLogger("funread")
+MAX_SOURCE_LIST_BYTES = 16 * 1024 * 1024
 
 SOURCE_STATUS_PENDING = 1
 SOURCE_STATUS_AVAILABLE = 2
@@ -323,6 +325,17 @@ def _iter_source_urls(record: SourceListRecord) -> Iterator[str]:
         yield record.url.replace("{id}", str(source_id))
 
 
+def download_source_list_url(url: str, timeout: int = 30) -> Any:
+    with requests.get(url, timeout=timeout, stream=True) as response:
+        response.raise_for_status()
+        body = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            body.extend(chunk)
+            if len(body) > MAX_SOURCE_LIST_BYTES:
+                raise ValueError("采集源文件超过 16 MiB")
+        return json.loads(body)
+
+
 def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> list[Any]:
     """Fetch one list URL, or internally expand one incrementing URL template."""
     payloads: list[Any] = []
@@ -330,9 +343,7 @@ def fetch_source_list_data(record: SourceListRecord, timeout: int = 30) -> list[
     incremental = record.increment_start is not None or record.increment_stop is not None
     for url in _iter_source_urls(record):
         try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            payloads.append(response.json())
+            payloads.append(download_source_list_url(url, timeout=timeout))
         except Exception as exc:
             if not incremental:
                 raise

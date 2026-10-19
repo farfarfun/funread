@@ -10,15 +10,15 @@
 `let x = 1`），这种跨源串台会表现成「某个源单独跑没问题、混在搜索里就出错」，
 属于最难复现的那类 bug。新建的代价实测在毫秒级，不值得为它冒这个险。
 
-## 资源上限：有两道，但**没有时间上限**
+## 资源上限
 
 这是 quickjs 这个 Python 绑定的硬限制，不是设计选择：
 
     >>> ctx.set_time_limit(5.0); ctx.add_callable("f", f); ctx.eval("f()")
     InternalError: Can not call into Python with a time limit set.
 
-时间限制和 Python 回调互斥，二选一。而宿主 API（`java.*`）正是 JS 支持的全部
-意义 —— 没有它，能跑的那些规则本来就不需要 JS。所以时间限制让路。
+时间限制和 Python 回调互斥。规则在子进程中运行，宿主回调通过管道交给父进程；
+超时后可以直接终止子进程，不影响服务进程。
 
 剩下两道都验证过确实拦得住：
 
@@ -26,19 +26,22 @@
   而且抛完之后回调仍然可用）。这是最常见的失控形态。
 - **栈上限**挡住无限递归。
 
-**挡不住的是纯计算死循环**（`while (true) { i++ }`）—— 不吃内存也不递归。
-已知风险，后果是占住聚合搜索线程池里的一个 worker 直到进程重启。真要堵上得把
-JS 放进子进程，而那样每次求值都要付 IPC 的钱，对一次搜索跑几十个源的场景不划算。
-书源作者自己也要能跑通规则，所以这种循环在归档里极罕见。
+纯计算死循环（`while (true) { i++ }`）由父进程的墙钟时限终止。宿主网络
+回调在父进程里执行，仍受抓取器自己的网络超时约束。
 """
 
 from __future__ import annotations
 
+import json
+import multiprocessing
+import threading
+import time
 from typing import Any, Callable, Dict, Optional
 
 from farlog import getLogger
 
 from ..errors import JsNotSupportedError
+from ..fetch import Request
 from .base import JsContext
 from .host import HostApi
 
@@ -49,6 +52,9 @@ logger = getLogger("funread")
 DEFAULT_MEMORY_LIMIT = 64 * 1024 * 1024
 #: 单次求值的栈上限，挡无限递归。1MB 够正常规则用好几层。
 DEFAULT_STACK_SIZE = 1024 * 1024
+DEFAULT_EXECUTION_TIMEOUT = 5.0
+# shortcut: one process per eval has startup cost; pool workers if JS-heavy searches become slow.
+_JS_SLOTS = threading.BoundedSemaphore(8)
 
 #: 把宿主对象拼成 JS 侧的命名空间。quickjs 的 `add_callable` 只能注册顶层函数，
 #: 所以先注册成带前缀的扁平名字，再用这段脚本组装成 `java.xxx` 的形状。
@@ -101,6 +107,40 @@ var book = {
 """
 
 
+def _run_js(
+    conn,
+    script: str,
+    values: dict[str, Any],
+    bindings: tuple[str, ...],
+    memory_limit: int,
+    stack_size: int,
+) -> None:
+    try:
+        import quickjs
+
+        ctx = quickjs.Context()
+        ctx.set_memory_limit(memory_limit)
+        ctx.set_max_stack_size(stack_size)
+
+        def invoke(name: str, *args: Any) -> Any:
+            conn.send(("call", name, args))
+            return conn.recv()[1]
+
+        for name in bindings:
+            ctx.add_callable(name, lambda *args, _name=name: invoke(_name, *args))
+        ctx.eval(_BOOTSTRAP)
+        for name, value in values.items():
+            ctx.set(name, value)
+        result = _eval_script(ctx, script)
+        if isinstance(result, quickjs.Object):
+            result = json.loads(result.json())
+        conn.send(("result", result))
+    except Exception as exc:
+        conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
 class QuickJsRuntime:
     """用 quickjs 执行 Legado 的 JS 规则。"""
 
@@ -113,6 +153,7 @@ class QuickJsRuntime:
         select: Optional[Callable[[str, str, bool], Any]] = None,
         memory_limit: int = DEFAULT_MEMORY_LIMIT,
         stack_size: int = DEFAULT_STACK_SIZE,
+        timeout: float = DEFAULT_EXECUTION_TIMEOUT,
     ):
         #: 用来实现 `java.ajax`。给 None 的话那个方法会抛，而不是静默返回空串。
         self._fetcher = fetcher
@@ -120,6 +161,7 @@ class QuickJsRuntime:
         self._select = select
         self._memory_limit = memory_limit
         self._stack_size = stack_size
+        self._timeout = timeout
 
     def available(self) -> bool:
         try:
@@ -130,26 +172,73 @@ class QuickJsRuntime:
 
     def eval(self, script: str, context: JsContext) -> Any:
         try:
-            import quickjs
+            import quickjs  # noqa: F401
         except ImportError as exc:  # pragma: no cover - 取决于装没装 extra
             raise JsNotSupportedError(
                 "需要 JS 求值但没装 quickjs，装 funread[js] 后启用", rule=script
             ) from exc
 
-        ctx = quickjs.Context()
-        #  只设这两道。**不要加 set_time_limit** —— 它会让所有 `java.*` 调用
-        #  变成 "Can not call into Python"，理由见模块文档。
-        ctx.set_memory_limit(self._memory_limit)
-        ctx.set_max_stack_size(self._stack_size)
-
         host = self._build_host(context)
         #  本次求值期间失败的宿主调用。单独收着是为了在报错时附上 —— 见下面
         #  异常分支里的说明。
         failures: list[str] = []
-        self._install(ctx, host, context, failures)
+        bindings = self._bindings(host, failures)
+        values = {
+            "result": "" if context.result is None else str(context.result),
+            "baseUrl": context.base_url or "",
+            "src": context.src or "",
+            "title": context.title or "",
+            "key": context.key or "",
+            "page": int(context.page or 1),
+        }
 
         try:
-            return _eval_script(ctx, script)
+            with _JS_SLOTS:
+                process_context = multiprocessing.get_context("spawn")
+                parent, child = process_context.Pipe()
+                process = process_context.Process(
+                    target=_run_js,
+                    args=(
+                        child,
+                        script,
+                        values,
+                        tuple(bindings),
+                        self._memory_limit,
+                        self._stack_size,
+                    ),
+                )
+                started = False
+                try:
+                    process.start()
+                    started = True
+                    child.close()
+                    deadline = time.monotonic() + self._timeout
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not parent.poll(remaining):
+                            raise TimeoutError(f"JS 执行超过 {self._timeout:g} 秒")
+                        try:
+                            message = parent.recv()
+                        except EOFError as exc:
+                            raise RuntimeError("JS 子进程意外退出") from exc
+                        if message[0] == "call":
+                            callback_started = time.monotonic()
+                            parent.send(("return", bindings[message[1]](*message[2])))
+                            deadline += time.monotonic() - callback_started
+                        elif message[0] == "error":
+                            raise RuntimeError(message[1])
+                        else:
+                            return message[1]
+                finally:
+                    if started:
+                        if process.is_alive():
+                            process.terminate()
+                        process.join(timeout=1)
+                        if process.is_alive():
+                            process.kill()
+                            process.join()
+                    parent.close()
+                    child.close()
         except Exception as exc:
             #  quickjs 的异常类型随版本变（JSException / StackOverflow / 超时），
             #  一律折成 JsNotSupportedError：对调用方来说「这条规则没跑出来」是
@@ -193,12 +282,11 @@ class QuickJsRuntime:
 
         def ajax(url: str) -> str:
             #  复用引擎的 fetcher，拿到的是同一个 session（cookie / UA / 超时都在）
-            response = self._fetcher.get(url)
-            return getattr(response, "text", "") or ""
+            return self._fetcher.fetch(Request(url=url)).text
 
         return ajax
 
-    def _install(self, ctx: Any, host: HostApi, context: JsContext, failures: list[str]) -> None:
+    def _bindings(self, host: HostApi, failures: list[str]) -> Dict[str, Callable[..., Any]]:
         bindings: Dict[str, Callable[..., Any]] = {
             "__md5Encode": host.md5_encode,
             "__md5Encode16": host.md5_encode16,
@@ -225,19 +313,7 @@ class QuickJsRuntime:
             "__bookPutVariable": host.book_put_variable,
             "__bookGetVariable": host.book_get_variable,
         }
-        for name, func in bindings.items():
-            ctx.add_callable(name, _guard(name, func, failures))
-        ctx.eval(_BOOTSTRAP)
-
-        #  规则里可见的变量。`result` 必须是字符串 —— 频率榜第 2 和第 8 的
-        #  `result.match` / `result.replace` 是 JS 原生 String 方法，把它当宿主
-        #  API 实现是白做功，但前提是这里注入的确实是个字符串。
-        ctx.set("result", "" if context.result is None else str(context.result))
-        ctx.set("baseUrl", context.base_url or "")
-        ctx.set("src", context.src or "")
-        ctx.set("title", context.title or "")
-        ctx.set("key", context.key or "")
-        ctx.set("page", int(context.page or 1))
+        return {name: _guard(name, func, failures) for name, func in bindings.items()}
 
 
 def _guard(name: str, func: Callable[..., Any], failures: list[str]) -> Callable[..., Any]:

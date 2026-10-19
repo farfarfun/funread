@@ -77,13 +77,16 @@ class RssService:
     def available_sources(self, limit: int = 50, offset: int = 0, q: str = "") -> Dict[str, Any]:
         """候选池里的 Legado 订阅源，供「订阅源目录」页浏览。
 
-        只列 `enabled` 的 —— 那已经排除了规则不全、需要 JS 和 `singleUrl` 型。
+        只列现在仍能从归档装载的可用源；数据库索引可能比归档文件旧。
         这是本地查表加本地文件读取，不打网。
         """
         keyword = (q or "").strip()
         rows = self.registry.prefs(limit=None)
         items: List[Dict[str, Any]] = []
         for pref in rows:
+            spec = self.registry.load_spec(int(pref.url_id))
+            if spec is None or not spec.is_complete or spec.is_web_view or spec.needs_js():
+                continue
             if keyword and keyword not in (pref.name or ""):
                 continue
             items.append(
@@ -91,19 +94,13 @@ class RssService:
                     "url_id": int(pref.url_id),
                     "name": pref.name or "",
                     "needs_js": bool(pref.needs_js),
+                    "group": spec.group,
+                    "icon": spec.icon,
+                    "categories": [kind.name for kind in spec.rss_categories],
                 }
             )
         total = len(items)
         window = items[offset : offset + limit]
-        #  分类和图标要读源文件才有，所以只给当前这一页补 —— 全量补等于把
-        #  上千个 JSON 读一遍。
-        for item in window:
-            spec = self.registry.load_spec(item["url_id"])
-            if spec is None:
-                continue
-            item["group"] = spec.group
-            item["icon"] = spec.icon
-            item["categories"] = [kind.name for kind in spec.rss_categories]
         return {"items": window, "total": total, "limit": limit, "offset": offset}
 
     # ------------------------------------------------------------------ 订阅
@@ -180,6 +177,8 @@ class RssService:
         spec = self._spec(url_id)
         if spec.is_web_view and not self.allow_web_view:
             raise WebViewNotSupportedError("该订阅源需要浏览器环境，暂不支持", source_url=spec.url)
+        if spec.needs_js():
+            raise JsNotSupportedError("该订阅源需要 JS，暂不支持", source_url=spec.url)
         if not spec.is_complete:
             raise RuleSyntaxError(
                 f"该订阅源规则不完整，缺少：{'、'.join(spec.missing_core_fields())}"

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from farlog import getLogger
 
 from ..engine import SourceSpec, load_source
+from ..engine.js import default_js_runtime
 from ..manage.download.core.store import LocalSourceStore
 from .storage import ReaderSourcePref, list_source_prefs, upsert_source_prefs
 
@@ -119,6 +120,7 @@ class SourceRegistry:
             "enabled": 0,
         }
         batch: List[Dict[str, Any]] = []
+        js_available = self.source_type == "book" and default_js_runtime().available()
 
         for url_id, data in self.iter_archive():
             if limit is not None and stats["scanned"] >= limit:
@@ -142,7 +144,7 @@ class SourceRegistry:
                     or spec.has_rule("ruleSearch", "bookList")
                 )
             )
-            enabled = bool(is_complete and not needs_js and not web_view)
+            enabled = bool(is_complete and (not needs_js or js_available) and not web_view)
             if is_complete:
                 stats["complete"] += 1
             if needs_js:
@@ -172,6 +174,7 @@ class SourceRegistry:
 
         if batch:
             upsert_source_prefs(batch, database_url=self.database_url)
+        self.invalidate()
         logger.info(f"Reader registry scan finished: {stats}")
         return stats
 

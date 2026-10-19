@@ -1,10 +1,13 @@
+import json
 from datetime import UTC, datetime
 
+import pytest
 import requests
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from funread.legado.manage.source.storage import (
+    MAX_SOURCE_LIST_BYTES,
     SOURCE_STATUS_AVAILABLE,
     SOURCE_STATUS_BLACKLISTED,
     SOURCE_STATUS_PENDING,
@@ -13,6 +16,7 @@ from funread.legado.manage.source.storage import (
     SourceListRecord,
     add_source_detail_url,
     add_source_list_url,
+    download_source_list_url,
     init_source_db,
     iter_source_list_data,
     list_source_detail_records,
@@ -72,8 +76,23 @@ class _FakeResponse:
     def raise_for_status(self):
         return None
 
-    def json(self):
-        return self.payload
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def iter_content(self, _size):
+        yield json.dumps(self.payload).encode()
+
+
+def test_source_list_rejects_oversized_response(monkeypatch):
+    response = _FakeResponse([])
+    response.iter_content = lambda _size: iter([b"x" * (MAX_SOURCE_LIST_BYTES + 1)])
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: response)
+
+    with pytest.raises(ValueError, match="16 MiB"):
+        download_source_list_url("https://example.com/too-large.json")
 
 
 def test_iter_source_list_data_orders_by_last_queried_at_desc(tmp_path, monkeypatch):
@@ -95,7 +114,7 @@ def test_iter_source_list_data_orders_by_last_queried_at_desc(tmp_path, monkeypa
 
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, stream):
         calls.append(url)
         if url.endswith("newer.json"):
             return _FakeResponse([{"id": 1}, {"id": 2}])
@@ -137,7 +156,7 @@ def test_iter_source_list_data_expands_incrementing_source_internally(tmp_path, 
     )
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, stream):
         calls.append(url)
         if url.endswith("/8.json"):
             raise requests.ConnectionError("missing")

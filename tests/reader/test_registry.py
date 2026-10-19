@@ -1,6 +1,7 @@
 """候选源池：按 url_id 装载、全量扫描、选源。全部走临时归档目录，不打网。"""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +20,7 @@ GOOD = {
 #  空壳源：只有 url + name。实测占代表源的 19%，必须被挡在候选池外
 SHELL = {"bookSourceUrl": "https://shell.example.com", "bookSourceName": "空壳源"}
 
-#  字段齐全但正文规则要 JS —— phase 1 跑不了
+#  字段齐全但正文规则要 JS
 NEEDS_JS = {
     **GOOD,
     "bookSourceUrl": "https://js.example.com",
@@ -78,10 +79,23 @@ def test_load_spec_is_cached_including_misses(registry, tmp_path):
     assert registry.load_spec(101) is not None
 
 
+def test_scan_refreshes_cached_missing_source(registry, tmp_path):
+    assert registry.load_spec(101) is None
+    _write(tmp_path / "hubs", 101, GOOD)
+
+    registry.scan()
+
+    assert registry.load_spec(101) is not None
+
+
 # ------------------------------------------------------------------ 扫描
 
 
-def test_scan_records_static_verdicts(registry, tmp_path):
+def test_scan_records_static_verdicts(registry, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "funread.legado.reader.registry.default_js_runtime",
+        lambda: SimpleNamespace(available=lambda: False),
+    )
     hubs = tmp_path / "hubs"
     _write(hubs, 1, GOOD)
     _write(hubs, 2, SHELL)
@@ -95,7 +109,11 @@ def test_scan_records_static_verdicts(registry, tmp_path):
     assert stats["enabled"] == 1  # 只有 GOOD
 
 
-def test_only_complete_js_free_sources_are_enabled(registry, tmp_path):
+def test_only_complete_js_free_sources_are_enabled(registry, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "funread.legado.reader.registry.default_js_runtime",
+        lambda: SimpleNamespace(available=lambda: False),
+    )
     hubs = tmp_path / "hubs"
     _write(hubs, 1, GOOD)
     _write(hubs, 2, SHELL)
@@ -103,6 +121,19 @@ def test_only_complete_js_free_sources_are_enabled(registry, tmp_path):
     registry.scan()
 
     assert [pref.url_id for pref in registry.prefs()] == [1]
+
+
+def test_scan_enables_js_sources_when_runtime_is_available(registry, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "funread.legado.reader.registry.default_js_runtime",
+        lambda: SimpleNamespace(available=lambda: True),
+    )
+    hubs = tmp_path / "hubs"
+    _write(hubs, 1, GOOD)
+    _write(hubs, 2, NEEDS_JS)
+
+    assert registry.scan()["enabled"] == 2
+    assert [pref.url_id for pref in registry.prefs()] == [1, 2]
 
 
 def test_status_flag_is_only_a_weak_weight(registry, tmp_path):

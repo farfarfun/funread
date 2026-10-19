@@ -13,8 +13,7 @@
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from itertools import islice
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from farlog import getLogger
@@ -42,7 +41,7 @@ logger = getLogger("funread")
 #  所以 12 个里很可能一个都答不上来，表现成「这本书搜不到」。
 #
 #  但也不能全试：5,606 个 × 最长 12 秒超时，就算 24 并发也要几十分钟。所以是
-#  「分波搜 + 三条终止线」，见 `search_report`。
+#  有空位就补下一个源，并保留三条终止线，见 `search_report`。
 DEFAULT_SEARCH_SOURCES = 400
 
 #  并发数。比原来的 6 高一截 —— 瓶颈在等待响应而不在本机带宽，而且每个源是
@@ -50,11 +49,11 @@ DEFAULT_SEARCH_SOURCES = 400
 #  会越来越长，而 `SEARCH_BUDGET_SECONDS` 本来就会把它们截掉。
 DEFAULT_SEARCH_WORKERS = 24
 
-#  一波的大小。等于并发数，所以每一波都是一次满并发、一起收口。
+#  同时运行的源数上限；统计里的 waves 按每 24 个已尝试源折算。
 SEARCH_WAVE_SIZE = DEFAULT_SEARCH_WORKERS
 
 #  整轮搜索的墙钟预算（秒）。超了就把已有结果返回 —— **不是报错**。
-#  热门书通常第一波就够，冷门书会一直搜到这条线为止。
+#  热门书通常很快够数，冷门书会一直搜到这条线为止。
 SEARCH_BUDGET_SECONDS = 25.0
 
 #  有这么多个源答出了结果就停。再往下搜只是把同一本书的来源列表堆长 ——
@@ -199,7 +198,8 @@ class ReaderService:
                 "book", url_id, ok=False, error=str(exc), database_url=self.database_url
             )
             raise
-        storage.record_source_result("book", url_id, ok=True, database_url=self.database_url)
+        if result:
+            storage.record_source_result("book", url_id, ok=True, database_url=self.database_url)
         return result
 
     # ------------------------------------------------------------------ 搜索
@@ -212,25 +212,25 @@ class ReaderService:
         enough_hits: int = SEARCH_ENOUGH_HITS,
         budget: float = SEARCH_BUDGET_SECONDS,
     ) -> Dict[str, Any]:
-        """跨源聚合搜索，分波进行，连带返回这一轮的源统计。
+        """跨源聚合搜索，空出并发位就补源，连带返回这一轮的源统计。
 
         按 `书名+作者` 合并同一本书的多个来源。返回顺序是「命中的源最多的排前面」：
         被多个站点同时收录的书，通常既是用户要找的那本，也更有换源余地。
 
-        ## 为什么分波
+        ## 为什么限制并发
 
         书源池实测有 5,606 个可用源，而实跑可用率只有个位数百分比 —— 只打十几个源
         很可能一个都答不上来，表现成「这本书搜不到」。但全试也不行：5,606 × 最长
         12 秒，24 并发也要几十分钟。
 
-        所以按 `SEARCH_WAVE_SIZE` 一波一波搜，**三条终止线任一触发就停**：
+        同时最多跑 `SEARCH_WAVE_SIZE` 个源，谁先结束就补下一个；**三条终止线任一触发就停**：
 
         1. `enough_hits` 个源答出了结果 —— 够用了，再搜只是把来源列表堆长；
         2. 墙钟超过 `budget` —— 把已有结果返回，不报错；
         3. 试过的源达到 `max_sources`，或候选池本来就搜完了。
 
         候选池的顺序是「实跑成功过的排最前」（见 `list_source_prefs` 的 ORDER BY），
-        所以用得越久第一波的命中率越高 —— 这是分波能快的前提。
+        所以用得越久，前几个候选源的命中率越高。
 
         ## 统计字段
 
@@ -258,6 +258,7 @@ class ReaderService:
         aggregated: Dict[str, AggregatedBook] = {}
         order: List[str] = []
         started = time.monotonic()
+        deadline = started + max(0.0, budget)
         pool = self.registry.iter_candidates()
         wave_size = max(1, min(workers, SEARCH_WAVE_SIZE))
         stopped_by = "exhausted"
@@ -268,19 +269,35 @@ class ReaderService:
                 url_id, spec, lambda engine: engine.search(keyword), timeout=SEARCH_TIMEOUT
             )
 
-        while stats["sources_tried"] < max_sources:
-            remaining = max_sources - stats["sources_tried"]
-            wave = list(islice(pool, min(wave_size, remaining)))
-            if not wave:
-                stats["exhausted"] = True
-                stopped_by = "exhausted"
-                break
-
-            stats["waves"] += 1
-            stats["sources_tried"] += len(wave)
-            with ThreadPoolExecutor(max_workers=max(1, min(workers, len(wave)))) as executor:
-                futures = [executor.submit(_search_one, item) for item in wave]
-                for future in as_completed(futures):
+        executor = ThreadPoolExecutor(max_workers=wave_size)
+        pending = set()
+        pool_exhausted = False
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    stopped_by = "budget"
+                    break
+                while len(pending) < wave_size and stats["sources_tried"] < max_sources:
+                    item = next(pool, None)
+                    if item is None:
+                        pool_exhausted = True
+                        break
+                    pending.add(executor.submit(_search_one, item))
+                    stats["sources_tried"] += 1
+                    stats["waves"] = (stats["sources_tried"] - 1) // wave_size + 1
+                if not pending:
+                    stats["exhausted"] = pool_exhausted
+                    stopped_by = "exhausted" if pool_exhausted else "max_sources"
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    stopped_by = "budget"
+                    break
+                for future in done:
                     try:
                         url_id, books = future.result()
                     except (JsNotSupportedError, UnsupportedFeatureError) as exc:
@@ -305,16 +322,12 @@ class ReaderService:
                             else:
                                 aggregated[key] = AggregatedBook(book, url_id)
                                 order.append(key)
-
-            #  终止线按「代价从小到大」判：够了最省，超预算次之，源用完最后。
-            if stats["hits"] >= enough_hits:
-                stopped_by = "enough"
-                break
-            if time.monotonic() - started >= budget:
-                stopped_by = "budget"
-                break
-        else:
-            stopped_by = "max_sources"
+                if stats["hits"] >= enough_hits:
+                    stopped_by = "enough"
+                    break
+        finally:
+            # shortcut: running requests finish in the background; use cancellable workers if search concurrency grows.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         stats["elapsed"] = round(time.monotonic() - started, 2)
         stats["stopped_by"] = stopped_by

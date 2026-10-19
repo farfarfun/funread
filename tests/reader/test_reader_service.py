@@ -1,10 +1,11 @@
 """`ReaderService`：聚合搜索、缓存命中、失败记账。注入 `StaticFetcher`，不打网。"""
 
 import json
+import time
 
 import pytest
 
-from funread.legado.engine import Chapter, StaticFetcher
+from funread.legado.engine import Chapter, SearchBook, StaticFetcher
 from funread.legado.engine.errors import JsNotSupportedError
 from funread.legado.reader import ReaderService, SourceRegistry, storage, unread_chapters
 
@@ -172,6 +173,16 @@ def test_success_is_recorded_against_the_source(make_service):
     service.search("剑来")
 
     assert storage.list_source_prefs(database_url=service.database_url)[0].last_ok_at is not None
+
+
+def test_empty_search_does_not_promote_the_source(make_service):
+    service = make_service(
+        pages={"https://a.example.com/s?q=剑来": _search_html([])},
+        sources={1: _source("a.example.com", "甲源")},
+    )
+
+    assert service.search_report("剑来")["sources_ok"] == 1
+    assert storage.list_source_prefs(database_url=service.database_url)[0].last_ok_at is None
 
 
 def test_js_source_is_disabled_on_the_spot(make_service, monkeypatch):
@@ -369,6 +380,24 @@ def test_search_walks_more_waves_when_the_early_sources_are_dead(make_service):
     assert report["hits"] == 1
 
 
+def test_slow_source_does_not_block_the_next_candidate(make_service, monkeypatch):
+    service = make_service(pages={}, sources=_many_sources(25))
+
+    def search_one(url_id, spec, action, timeout):
+        if url_id == 1:
+            time.sleep(0.3)
+        if url_id == 25:
+            return [SearchBook(name="仙逆", author="耳根", book_url="https://s25.example.com/b/1")]
+        return []
+
+    monkeypatch.setattr(service, "_run", search_one)
+    report = service.search_report("仙逆", budget=0.15, enough_hits=1)
+
+    assert report["items"][0]["name"] == "仙逆"
+    assert report["stopped_by"] == "enough"
+    assert report["sources_tried"] == 25
+
+
 def test_search_respects_the_source_cap(make_service):
     sources = _many_sources(60)
     service = make_service(pages={}, sources=sources)
@@ -399,13 +428,28 @@ def test_search_respects_the_wall_clock_budget(make_service, monkeypatch):
         pages=_pages_for(sources, "剑来", [("剑来", "烽火戏诸侯")]),
         sources=sources,
     )
-    #  预算设成 0：第一波跑完就必然超
+    #  预算设成 0：不启动任何抓取
     report = service.search_report("剑来", enough_hits=99, budget=0.0)
 
     assert report["stopped_by"] == "budget"
-    assert report["waves"] == 1
-    #  已有结果照常返回
-    assert [item["name"] for item in report["items"]] == ["剑来"]
+    assert report["waves"] == 0
+    assert report["items"] == []
+
+
+def test_search_returns_before_a_slow_wave_finishes(make_service, monkeypatch):
+    sources = _many_sources(2)
+    service = make_service(pages={}, sources=sources)
+
+    def slow_run(*args, **kwargs):
+        time.sleep(0.2)
+        return []
+
+    monkeypatch.setattr(service, "_run", slow_run)
+    started = time.monotonic()
+    report = service.search_report("剑来", workers=2, budget=0.02)
+
+    assert report["stopped_by"] == "budget"
+    assert time.monotonic() - started < 0.15
 
 
 def test_search_records_elapsed_and_waves(make_service):

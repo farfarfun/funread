@@ -5,7 +5,7 @@ import json
 import pytest
 
 from funread.base import config
-from funread.legado.engine import RuleSyntaxError, WebViewNotSupportedError
+from funread.legado.engine import JsNotSupportedError, RuleSyntaxError, WebViewNotSupportedError
 from funread.legado.reader import storage
 from funread.legado.reader.registry import SourceRegistry
 from funread.legado.reader.rss_service import RssService
@@ -126,6 +126,42 @@ def test_available_sources_paginates(service):
     assert page["total"] == 1
 
 
+def test_stale_js_source_is_hidden_from_directory(service):
+    storage.upsert_source_prefs(
+        [
+            {
+                "source_type": "rss",
+                "url_id": 3,
+                "name": "需要 JS",
+                "enabled": True,
+                "is_complete": True,
+                "needs_js": True,
+            }
+        ],
+        database_url=service.database_url,
+    )
+    assert [item["url_id"] for item in service.available_sources()["items"]] == [1]
+    assert service.available_sources()["total"] == 1
+
+
+def test_missing_archive_source_is_hidden_from_directory(service):
+    storage.upsert_source_prefs(
+        [
+            {
+                "source_type": "rss",
+                "url_id": 999,
+                "name": "已删除的源",
+                "enabled": True,
+                "is_complete": True,
+            }
+        ],
+        database_url=service.database_url,
+    )
+    page = service.available_sources(limit=1)
+    assert page["total"] == 1
+    assert [item["url_id"] for item in page["items"]] == [1]
+
+
 # ---------------------------------------------------------------- 订阅 legado
 
 
@@ -140,6 +176,12 @@ def test_subscribing_to_a_web_view_source_is_refused_up_front(service):
     """订上一个点开永远是错误提示的源，比当场拒绝要糟得多。"""
     with pytest.raises(WebViewNotSupportedError):
         service.subscribe_legado(2, user_id=1)
+    assert service.subscriptions(1) == []
+
+
+def test_subscribing_to_a_js_source_is_refused_up_front(service):
+    with pytest.raises(JsNotSupportedError):
+        service.subscribe_legado(3, user_id=1)
     assert service.subscriptions(1) == []
 
 
