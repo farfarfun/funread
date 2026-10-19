@@ -358,9 +358,8 @@ def test_search_stops_once_enough_sources_answered(make_service):
 
     assert report["stopped_by"] == "enough"
     assert report["hits"] >= 5
-    #  一波 24 个，所以第一波就够了 —— 不该把 60 个都试完
+    #  持续补源时具体尝试数取决于线程完成顺序，但够数后不应试完所有源。
     assert report["sources_tried"] < 60
-    assert report["waves"] == 1
 
 
 def test_search_walks_more_waves_when_the_early_sources_are_dead(make_service):
