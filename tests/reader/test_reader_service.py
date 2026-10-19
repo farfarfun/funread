@@ -2,6 +2,7 @@
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -608,6 +609,23 @@ def test_explore_sources_filters_and_paginates(make_service):
         and len(service.explore_sources(limit=1)["items"]) == 1
     )
     assert service.explore_sources(limit=1, offset=9)["items"] == []
+
+
+def test_explore_sources_hides_missing_archive_files(make_service):
+    service = make_service(
+        pages={},
+        sources={
+            1: _explore_source("a.example.com", "已删除的源"),
+            2: _explore_source("b.example.com", "仍可用的源"),
+        },
+    )
+    path = service.registry.store.source_file_path(1)
+    Path(path).unlink()
+
+    result = service.explore_sources(limit=1)
+    assert result["total"] == 1
+    assert [item["url_id"] for item in result["items"]] == [2]
+    assert service.explore_kinds(result["items"][0]["url_id"])
 
 
 def test_explore_kinds_touches_no_network(make_service):
