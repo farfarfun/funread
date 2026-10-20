@@ -5,8 +5,9 @@
 """
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
+from funread.legado.manage.source.storage import _get_engine
 from funread.legado.reader import storage
 
 
@@ -499,6 +500,19 @@ def test_adding_columns_twice_is_a_no_op(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ 测试成功率
 
 
+def test_existing_source_prefs_get_last_test_columns(db):
+    engine = _get_engine(db)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE reader_source_prefs DROP COLUMN last_test_at"))
+        connection.execute(text("ALTER TABLE reader_source_prefs DROP COLUMN last_test_ok"))
+        connection.execute(text("ALTER TABLE reader_source_prefs DROP COLUMN enabled_override"))
+
+    storage._migrate_added_columns(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("reader_source_prefs")}
+    assert {"last_test_at", "last_test_ok", "enabled_override"} <= columns
+
+
 def test_test_results_accumulate_instead_of_resetting(db):
     """测试计数是**样本**，只累加不清零。
 
@@ -515,6 +529,8 @@ def test_test_results_accumulate_instead_of_resetting(db):
     row = storage.list_source_prefs(source_type="rss", database_url=db)[0]
     assert row.test_count == 3
     assert row.test_ok_count == 1
+    assert row.last_test_at is not None
+    assert row.last_test_ok is False
 
 
 def test_a_test_failure_does_not_touch_the_live_failure_counter(db):
@@ -530,6 +546,7 @@ def test_a_test_failure_does_not_touch_the_live_failure_counter(db):
     row = storage.list_source_prefs(source_type="rss", database_url=db)[0]
     assert row.fail_count == 0
     assert row.test_count == 1
+    assert row.last_test_at is not None
 
 
 def test_success_rate_outranks_everything_else(db):
@@ -601,4 +618,5 @@ def test_reset_scores_clears_the_samples(db):
     assert storage.reset_source_tests("rss", database_url=db) == 1
 
     row = storage.list_source_prefs("rss", database_url=db)[0]
-    assert (row.test_count, row.test_ok_count) == (0, 0)
+    assert (row.test_count, row.test_ok_count, row.last_test_at) == (0, 0, None)
+    assert row.last_test_ok is None

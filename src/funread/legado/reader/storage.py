@@ -79,6 +79,7 @@ class ReaderSourcePref(ReaderBase):
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     source_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    enabled_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     weight: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     needs_js: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -96,6 +97,8 @@ class ReaderSourcePref(ReaderBase):
     #: 每轮批量测试给每个源记一次，跑 100 轮就是 100 次 —— 不是一次测 100 遍。
     test_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     test_ok_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_test_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     last_ok_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -277,10 +280,13 @@ _USER_SCOPED_TABLES = {
 #: 格式：表名 → [(列名, DDL 片段)]
 _ADDED_COLUMNS = {
     "reader_source_prefs": [
+        ("enabled_override", "BOOLEAN NULL"),
         ("source_json", "JSON NULL"),
         ("has_explore", "BOOLEAN NOT NULL DEFAULT 0"),
         ("test_count", "INTEGER NOT NULL DEFAULT 0"),
         ("test_ok_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_test_at", "TIMESTAMP NULL"),
+        ("last_test_ok", "BOOLEAN NULL"),
     ],
     "reader_shelf": [
         ("group", "VARCHAR(128) NOT NULL DEFAULT ''"),
@@ -456,6 +462,8 @@ def upsert_source_prefs(
             for field, value in payload.items():
                 if field in ("source_type", "url_id"):
                     continue
+                if field == "enabled" and row.enabled_override is not None:
+                    continue
                 if hasattr(row, field):
                     setattr(row, field, value)
         session.commit()
@@ -604,9 +612,11 @@ def record_source_test(
             row = ReaderSourcePref(source_type=source_type, url_id=int(url_id))
             session.add(row)
         row.test_count = int(row.test_count or 0) + 1
+        row.last_test_at = utcnow()
+        row.last_test_ok = ok
         if ok:
             row.test_ok_count = int(row.test_ok_count or 0) + 1
-            row.last_ok_at = utcnow()
+            row.last_ok_at = row.last_test_at
             row.last_error = None
         else:
             row.last_error = (error or "")[:1024] or None
@@ -628,7 +638,7 @@ def reset_source_tests(
         stmt = (
             update(ReaderSourcePref)
             .where(ReaderSourcePref.source_type == source_type)
-            .values(test_count=0, test_ok_count=0)
+            .values(test_count=0, test_ok_count=0, last_test_at=None, last_test_ok=None)
         )
         if url_id is not None:
             stmt = stmt.where(ReaderSourcePref.url_id == int(url_id))
