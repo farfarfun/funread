@@ -77,17 +77,21 @@ class RssService:
     def available_sources(self, limit: int = 50, offset: int = 0, q: str = "") -> Dict[str, Any]:
         """候选池里的 Legado 订阅源，供「订阅源目录」页浏览。
 
-        只列现在仍能从归档装载的可用源；数据库索引可能比归档文件旧。
-        这是本地查表加本地文件读取，不打网。
+        只列已入库且通过静态判定的源；源规则在数据库中，不打网。
         """
         keyword = (q or "").strip()
         rows = self.registry.prefs(limit=None)
+        matches = [
+            pref
+            for pref in rows
+            if pref.is_complete
+            and not pref.needs_js
+            and (not keyword or keyword in (pref.name or ""))
+        ]
         items: List[Dict[str, Any]] = []
-        for pref in rows:
+        for pref in matches[offset : offset + limit]:
             spec = self.registry.load_spec(int(pref.url_id))
             if spec is None or not spec.is_complete or spec.is_web_view or spec.needs_js():
-                continue
-            if keyword and keyword not in (pref.name or ""):
                 continue
             items.append(
                 {
@@ -99,9 +103,7 @@ class RssService:
                     "categories": [kind.name for kind in spec.rss_categories],
                 }
             )
-        total = len(items)
-        window = items[offset : offset + limit]
-        return {"items": window, "total": total, "limit": limit, "offset": offset}
+        return {"items": items, "total": len(matches), "limit": limit, "offset": offset}
 
     # ------------------------------------------------------------------ 订阅
 

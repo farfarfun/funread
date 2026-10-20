@@ -63,7 +63,7 @@ def make_service(tmp_path):
             _write(hubs, url_id, source)
         db = f"sqlite:///{tmp_path / 'reader.db'}"
         registry = SourceRegistry(cache_root=str(hubs), database_url=db)
-        registry.scan()
+        registry.import_archive()
         fetcher = StaticFetcher(pages)
         service = ReaderService(
             database_url=db,
@@ -611,7 +611,7 @@ def test_explore_sources_filters_and_paginates(make_service):
     assert service.explore_sources(limit=1, offset=9)["items"] == []
 
 
-def test_explore_sources_hides_missing_archive_files(make_service):
+def test_explore_sources_uses_saved_rules_after_archive_removal(make_service):
     service = make_service(
         pages={},
         sources={

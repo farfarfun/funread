@@ -1,4 +1,4 @@
-"""候选源池：规则保存在数据库，本地归档只用于迁移旧数据。
+"""候选源池：运行时只从数据库加载规则，本地归档仅供显式迁移。
 
 **不要把采集侧的 `status==2` 当作可用性依据。** 那个标记只代表某次 GET 过站点首页
 （`source/check/task.py` 从头到尾不碰 `searchUrl`），实测 150 个 `status==2` 的源
@@ -8,8 +8,9 @@
 
 import os
 import threading
-from itertools import chain
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 from farlog import getLogger
 
@@ -34,6 +35,14 @@ SOURCE_STATUS_AVAILABLE = 2
 #  一次写库的批大小。全量扫描有上万条，攒批比逐条 commit 快一个数量级。
 SCAN_BATCH_SIZE = 500
 _INGEST_LOCK = threading.Lock()
+SPEC_CACHE_SECONDS = 60
+
+
+def _rss_identity(url: str) -> str:
+    parsed = urlsplit(url.strip())
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), parsed.query, "")
+    )
 
 
 class SourceRegistry:
@@ -56,7 +65,7 @@ class SourceRegistry:
         self.source_type = source_type
         self.database_url = database_url
         self._store: Optional[LocalSourceStore] = None
-        self._specs: Dict[int, Optional[SourceSpec]] = {}
+        self._specs: Dict[int, Tuple[float, SourceSpec]] = {}
 
     @property
     def store(self) -> LocalSourceStore:
@@ -69,21 +78,21 @@ class SourceRegistry:
     def load_spec(self, url_id: int) -> Optional[SourceSpec]:
         """按 url_id 取归一化后的源。取不到 / 解析不了都返回 None。
 
-        结果（包括 None）进内存缓存，供同一轮搜索反复使用。
+        成功结果短时缓存；缺失不缓存，其他服务器入库后即可被看见。
         """
         key = int(url_id)
-        if key in self._specs:
-            return self._specs[key]
+        cached = self._specs.get(key)
+        if cached and time.monotonic() - cached[0] < SPEC_CACHE_SECONDS:
+            return cached[1]
         spec = self._load_spec_uncached(key)
-        self._specs[key] = spec
+        if spec is not None:
+            self._specs[key] = (time.monotonic(), spec)
+        else:
+            self._specs.pop(key, None)
         return spec
 
     def _load_spec_uncached(self, url_id: int) -> Optional[SourceSpec]:
         data = get_source_json(self.source_type, url_id, self.database_url)
-        if data is None and os.path.isdir(
-            os.path.join(self.cache_root, self.source_type, "source")
-        ):
-            data = self.store.load_by_url_id(url_id)
         if data is None:
             return None
         try:
@@ -150,7 +159,12 @@ class SourceRegistry:
             "source_type": self.source_type,
             "url_id": url_id,
             "name": (spec.name or "")[:255],
-            "source_json": data,
+            # 归档可能含数百份重复候选；只保存解析器选中的那份规则。
+            "source_json": {
+                key: value
+                for key, value in spec.raw.items()
+                if key not in ("bookSourceComment", "sourceComment")
+            },
             "enabled": enabled,
             "weight": 1 if data.get("status") == SOURCE_STATUS_AVAILABLE else 0,
             "is_complete": is_complete,
@@ -166,7 +180,13 @@ class SourceRegistry:
     def _ingest_locked(self, payloads: List[Any]) -> int:
         url_key = "bookSourceUrl" if self.source_type == "book" else "sourceUrl"
         url_map = load_source_detail_url_map(self.source_type, self.database_url)
+        if self.source_type == "rss":
+            for url_id, saved in iter_source_json("rss", self.database_url):
+                raw_url = saved.get("sourceUrl")
+                if isinstance(raw_url, str):
+                    url_map.setdefault(_rss_identity(raw_url), url_id)
         rows: Dict[int, Dict[str, Any]] = {}
+        unique: Dict[str, Tuple[Tuple[bool, bool, bool, bool, int], Dict[str, Any]]] = {}
         stats = dict.fromkeys(("complete", "needs_js", "web_view", "has_explore", "enabled"), 0)
         for payload in payloads:
             if isinstance(payload, list):
@@ -189,15 +209,30 @@ class SourceRegistry:
                 hostname = url_to_hostname(raw_url) if isinstance(raw_url, str) else None
                 if not hostname:
                     continue
-                url_id = url_map.get(hostname)
-                if url_id is None:
-                    url_id = add_source_detail_url(
-                        hostname, self.source_type, database_url=self.database_url
-                    ).id
-                    url_map[hostname] = url_id
-                row = self._verdict(url_id, source, stats)
-                if row is not None:
-                    rows[url_id] = row
+                identity = _rss_identity(raw_url) if self.source_type == "rss" else hostname
+                try:
+                    spec = load_source(source, source_type=self.source_type)
+                except Exception:
+                    continue
+                quality = (
+                    spec.is_complete,
+                    not spec.is_web_view,
+                    not spec.needs_js(),
+                    bool(spec.explore_url and spec.has_rule("ruleExplore", "bookList")),
+                    len(spec.raw),
+                )
+                if identity not in unique or quality > unique[identity][0]:
+                    unique[identity] = (quality, source)
+        for identity, (_, source) in unique.items():
+            url_id = url_map.get(identity)
+            if url_id is None:
+                url_id = add_source_detail_url(
+                    identity, self.source_type, database_url=self.database_url
+                ).id
+                url_map[identity] = url_id
+            row = self._verdict(url_id, source, stats)
+            if row is not None:
+                rows[url_id] = row
         values = list(rows.values())
         for start in range(0, len(values), SCAN_BATCH_SIZE):
             upsert_source_prefs(
@@ -207,16 +242,21 @@ class SourceRegistry:
         return len(values)
 
     def scan(self, limit: Optional[int] = None) -> Dict[str, int]:
-        """重算数据库规则，并从旧归档补入尚未保存的规则。
+        """只重算数据库里已有的规则，不读取本机归档。
 
         只写静态字段（`name`/`enabled`/`weight`/`is_complete`/`needs_js`），
         **不碰** `fail_count`/`last_ok_at`/`last_error` —— 那些是实跑积累下来的，
         重扫一次不该把它们抹掉。
         """
         with _INGEST_LOCK:
-            return self._scan_locked(limit)
+            return self._scan_locked(limit, archive=False)
 
-    def _scan_locked(self, limit: Optional[int]) -> Dict[str, int]:
+    def import_archive(self, limit: Optional[int] = None) -> Dict[str, int]:
+        """一次性迁移旧归档；服务接口不会调用。"""
+        with _INGEST_LOCK:
+            return self._scan_locked(limit, archive=True)
+
+    def _scan_locked(self, limit: Optional[int], *, archive: bool) -> Dict[str, int]:
         stats = {
             "scanned": 0,
             "complete": 0,
@@ -227,9 +267,12 @@ class SourceRegistry:
         }
         batch: List[Dict[str, Any]] = []
         seen: set[int] = set()
-        for url_id, data in chain(
-            iter_source_json(self.source_type, self.database_url), self.iter_archive()
-        ):
+        source_rows = (
+            self.iter_archive()
+            if archive
+            else iter_source_json(self.source_type, self.database_url)
+        )
+        for url_id, data in source_rows:
             if limit is not None and stats["scanned"] >= limit:
                 break
             if url_id in seen:
@@ -262,6 +305,7 @@ class SourceRegistry:
             enabled_only=True,
             limit=limit,
             explore_only=explore_only,
+            with_rules_only=True,
             database_url=self.database_url,
         )
 

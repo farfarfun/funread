@@ -495,6 +495,7 @@ def list_source_prefs(
     enabled_only: bool = True,
     limit: Optional[int] = None,
     explore_only: bool = False,
+    with_rules_only: bool = False,
     database_url: Optional[str] = None,
 ) -> List[ReaderSourcePref]:
     """按「测试成功率高的优先，其次真跑通过的、失败少的、权重高的」列出源。
@@ -523,6 +524,8 @@ def list_source_prefs(
             stmt = stmt.where(ReaderSourcePref.enabled.is_(True))
         if explore_only:
             stmt = stmt.where(ReaderSourcePref.has_explore.is_(True))
+        if with_rules_only:
+            stmt = stmt.where(ReaderSourcePref.source_json.is_not(None))
         #  整数除法会把 7/10 算成 0，必须先转浮点再除
         success_rate = case(
             (

@@ -388,15 +388,13 @@ class ReaderService:
         第一步。抽样实测 **54.9% 的书源带发现页规则**，其中纯 Python 可跑的占
         19.3%（全量折算约 2,500 个源）。
 
-        数据库索引可能比归档文件旧；先确认源仍可加载且有分类，再计算总数和分页，
-        否则列表中会出现点开就报「源不存在」的条目。
+        候选查询已排除未入库规则的旧元数据；静态分类判定由入库时计算。
         """
         keyword = (q or "").strip()
         rows = self.registry.prefs(limit=None, explore_only=True)
+        matches = [pref for pref in rows if not keyword or keyword in (pref.name or "")]
         items: List[Dict[str, Any]] = []
-        for pref in rows:
-            if keyword and keyword not in (pref.name or ""):
-                continue
+        for pref in matches[offset : offset + limit]:
             spec = self.registry.load_spec(int(pref.url_id))
             if spec is None:
                 continue
@@ -410,9 +408,7 @@ class ReaderService:
                     "kinds": kinds,
                 }
             )
-        total = len(items)
-        window = items[offset : offset + limit]
-        return {"items": window, "total": total, "limit": limit, "offset": offset}
+        return {"items": items, "total": len(matches), "limit": limit, "offset": offset}
 
     def explore_kinds(self, url_id: int) -> List[Dict[str, str]]:
         """一个源的发现页分类。零网络 —— `exploreUrl` 是源 JSON 里的静态字段。

@@ -94,7 +94,7 @@ def service(tmp_path, hub, monkeypatch):
         return StaticFetcher(dict(pages))
 
     registry = SourceRegistry(cache_root=str(hub), source_type="rss", database_url=url)
-    registry.scan()
+    registry.import_archive()
     return RssService(database_url=url, registry=registry, fetcher_factory=factory)
 
 
