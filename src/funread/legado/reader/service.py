@@ -398,7 +398,7 @@ class ReaderService:
             spec = self.registry.load_spec(int(pref.url_id))
             if spec is None:
                 continue
-            kinds = [kind.name for kind in spec.explore_kinds() if kind.name and kind.url]
+            kinds = [kind.name or spec.name for kind in spec.explore_kinds() if kind.url]
             if not kinds:
                 continue
             items.append(
@@ -419,7 +419,11 @@ class ReaderService:
         顺序反过来就可能把选项拼坏。
         """
         spec = self._spec(url_id)
-        kinds = [{"name": kind.name, "url": kind.url} for kind in spec.explore_kinds() if kind.url]
+        kinds = [
+            {"name": kind.name or spec.name, "url": kind.url}
+            for kind in spec.explore_kinds()
+            if kind.url
+        ]
         if not kinds:
             raise LookupError("这个源没有可浏览的分类")
         return kinds

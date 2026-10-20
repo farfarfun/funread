@@ -363,6 +363,17 @@ def test_ingest_prefers_browsable_duplicate(registry):
     assert registry.load_spec(pref.url_id).explore_url == "/browse"
 
 
+def test_ingest_excludes_sources_without_parseable_explore_kinds(registry):
+    source = {
+        **GOOD,
+        "exploreUrl": '[{"title":"空分类","url":""}]',
+        "ruleExplore": {"bookList": "class.item"},
+    }
+
+    assert registry.ingest([[source]]) == 1
+    assert registry.prefs(explore_only=True) == []
+
+
 def test_candidates_respects_the_limit(registry, tmp_path):
     hubs = tmp_path / "hubs"
     for index in range(1, 6):

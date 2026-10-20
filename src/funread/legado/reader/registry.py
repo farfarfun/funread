@@ -140,7 +140,7 @@ class SourceRegistry:
         needs_js = spec.needs_js()
         web_view = spec.is_web_view
         has_explore = bool(
-            spec.explore_url.strip()
+            any(kind.url for kind in spec.explore_kinds())
             and (
                 spec.has_rule("ruleExplore", "bookList") or spec.has_rule("ruleSearch", "bookList")
             )
@@ -218,7 +218,10 @@ class SourceRegistry:
                     spec.is_complete,
                     not spec.is_web_view,
                     not spec.needs_js(),
-                    bool(spec.explore_url and spec.has_rule("ruleExplore", "bookList")),
+                    bool(
+                        any(kind.url for kind in spec.explore_kinds())
+                        and spec.has_rule("ruleExplore", "bookList")
+                    ),
                     len(spec.raw),
                 )
                 if identity not in unique or quality > unique[identity][0]:

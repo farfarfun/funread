@@ -594,6 +594,15 @@ def test_explore_sources_includes_the_category_names(make_service):
     assert service.explore_sources()["items"][0]["kinds"] == ["玄幻", "都市"]
 
 
+def test_explore_sources_names_an_unnamed_category(make_service):
+    service = make_service(
+        pages={}, sources={1: _explore_source("a.example.com", "甲源", kinds="/browse")}
+    )
+
+    assert service.explore_sources()["items"][0]["kinds"] == ["甲源"]
+    assert service.explore_kinds(1) == [{"name": "甲源", "url": "/browse"}]
+
+
 def test_explore_sources_filters_and_paginates(make_service):
     service = make_service(
         pages={},
