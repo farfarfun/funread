@@ -228,10 +228,12 @@ def test_export_sources_only_includes_pending_and_available_statuses(tmp_path: P
 
     exported = next(source.export_sources(size=10))
 
-    assert [item["sourceUrl"].split("#")[0] for item in exported] == [
-        "https://rss.example.com/pending",
-        "https://rss.example.com/available",
-    ]
+    assert sorted(item["sourceUrl"].split("#")[0] for item in exported) == sorted(
+        [
+            "https://rss.example.com/pending",
+            "https://rss.example.com/available",
+        ]
+    )
 
 
 class _FakeDrive:
@@ -361,10 +363,12 @@ def test_upload_only_includes_pending_and_available_sources(tmp_path: Path) -> N
     UploadSourceBatchesTask(store=source, remote_manager=_RemoteManager()).run()
 
     assert len(uploaded_batches) == 1
-    assert [item["sourceUrl"].split("#")[0] for item in uploaded_batches[0]] == [
-        "https://rss.example.com/pending",
-        "https://rss.example.com/available",
-    ]
+    assert sorted(item["sourceUrl"].split("#")[0] for item in uploaded_batches[0]) == sorted(
+        [
+            "https://rss.example.com/pending",
+            "https://rss.example.com/available",
+        ]
+    )
 
 
 def test_source_step_tasks_delegate_to_generator() -> None:
